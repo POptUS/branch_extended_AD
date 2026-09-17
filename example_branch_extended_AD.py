@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import jax.numpy as jnp
-import jaxnp_hash as jnph
-import jaxnp_hash.numpy as jnp_h
+import branch_extended_AD as jnph
+import branch_extended_AD.numpy as jnp_h
 
 
 def branching_function(x, y):

@@ -1,7 +1,7 @@
 from setuptools import find_packages, setup
 
 setup(
-    name='jaxnp_hash',
+    name='branch_extended_AD',
     version='0.1',
     packages=find_packages(),
     install_requires=[],
@@ -12,7 +12,7 @@ setup(
     description='A package that wraps around JAX to implement autodiff for fixed control flow paths.',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
-    url='https://github.com/jhueckelheim/jaxnp_hash/',
+    url='https://github.com/POptUS/branch_extended_AD/',
     classifiers=[
         'Programming Language :: Python :: 3',
         'License :: OSI Approved :: MIT License',

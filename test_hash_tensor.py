@@ -7,13 +7,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import jaxnp_hash as jnph
-import jaxnp_hash.numpy as jnph_np
+import branch_extended_AD as jnph
+import branch_extended_AD.numpy as jnph_np
 
-# jaxnp_hash/__init__.py does `from .HashTensor import HashTensor` (the class), which
-# shadows the `jaxnp_hash.HashTensor` submodule attribute on the package -- import via
+# branch_extended_AD/__init__.py does `from .HashTensor import HashTensor` (the class), which
+# shadows the `branch_extended_AD.HashTensor` submodule attribute on the package -- import via
 # importlib to reach private module-level helpers like `_bucket_size`.
-ht = importlib.import_module("jaxnp_hash.HashTensor")
+ht = importlib.import_module("branch_extended_AD.HashTensor")
 
 
 def test_maximum():
