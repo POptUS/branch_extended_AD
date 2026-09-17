@@ -61,7 +61,7 @@ class _TraceNode:
 
 
 def path_key(path):
-    """Canonical hashable key for a single resolved path.
+    """Canonical hashable key for a single resolved path or other Hash entry.
 
     A "path" is a list of `_TraceNode`, each already narrowed to exactly one
     choice -- e.g. an element yielded by iterating a `PathSet`, or `PathSet[i]`.
@@ -73,12 +73,23 @@ def path_key(path):
     node names and their resolved choices, which `_branch_mode` always builds
     out of ints/bools/tuples) so raw paths can be deduplicated or tested for
     membership in O(1) amortized per path instead of O(n).
+
+    Non-path Hash entries -- e.g. a hand-coded hfun's plain string/int
+    identifiers, which are already hashable -- are passed through unchanged.
+    This lets callers that mix hand-coded and branch_extended_AD-derived Hash
+    entries use path_key (and paths_equal/unique_paths/paths_any_in/paths_all_in,
+    all built on it) uniformly without needing to know which kind of Hash
+    entry they have.
     """
+    if not isinstance(path, list):
+        return path
     return tuple((node.name, node.choices[0]) for node in path)
 
 
 def paths_equal(path1, path2):
-    """Value equality for two individual paths, independent of identity/hashing."""
+    """Value equality for two individual paths (or other Hash entries), independent of identity/hashing."""
+    if not isinstance(path1, list) or not isinstance(path2, list):
+        return path1 == path2
     if len(path1) != len(path2):
         return False
     for node1, node2 in zip(path1, path2):
