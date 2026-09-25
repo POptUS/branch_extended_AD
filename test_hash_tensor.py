@@ -634,6 +634,79 @@ def test_all_value_and_grad_argnums():
     assert jnp.allclose(g_y, jnp.array([1.0, 0.0, 0.0]))
 
 
+def test_relative_tolerance_recording():
+    x = jnp.array([100.0, 105.0, 1.0])
+
+    def f(x):
+        return jnph_np.max(x)
+
+    _, paths = jnph.record(f, rtol=0.1)(x)
+    assert len(paths) == 2
+
+
+def test_input_scaled_tolerance_mode():
+    x = jnp.array([1.0, 1.2])
+
+    def f(x):
+        return jnph_np.max(10.0 * x)
+
+    _, local_paths = jnph.record(f, atol=1.0)(x)
+    _, scaled_paths = jnph.record(f, atol=1.0, tol_mode="input_scaled")(x)
+    assert len(local_paths) == 1
+    assert len(scaled_paths) == 2
+
+
+def test_input_scaled_tolerance_uses_local_derivatives():
+    x = jnp.array([2.0, 2.2])
+
+    def f(x):
+        y = x * x
+        return jnph_np.max(y)
+
+    _, local_paths = jnph.record(f, atol=0.5)(x)
+    _, scaled_paths = jnph.record(f, atol=0.5, tol_mode="input_scaled")(x)
+    assert len(local_paths) == 1
+    assert len(scaled_paths) == 2
+
+
+def test_input_scaled_tolerance_avoids_flat_region_overbranching():
+    radius = 1.0
+
+    def f(x):
+        radial_excess = jnph_np.maximum(jnph_np.sum(x * x) - radius ** 2, 0.0)
+        return jnph_np.sum(jnph_np.abs(radial_excess * x))
+
+    center = jnp.array([0.0, 0.0, 0.0])
+    edge = jnp.array([1.02, 0.0, 0.0])
+    _, local_center_paths = jnph.record(f, atol=0.1)(center)
+    _, scaled_center_paths = jnph.record(f, atol=0.1, tol_mode="input_scaled")(center)
+    _, scaled_edge_paths = jnph.record(f, atol=0.1, tol_mode="input_scaled")(edge)
+    local_center_nearby = local_center_paths.trace[-1].choices[0][0]
+    scaled_center_nearby = scaled_center_paths.trace[-1].choices[0][0]
+    scaled_edge_nearby = scaled_edge_paths.trace[-1].choices[0][0]
+    assert len(local_center_nearby) == center.size
+    assert len(scaled_center_nearby) == 0
+    assert len(scaled_edge_nearby) > len(scaled_center_nearby)
+
+
+def test_existing_tol_is_backward_compatible_with_atol():
+    x = jnp.array([1.0, 1.05, 0.5])
+
+    def f(x):
+        return jnph_np.max(x)
+
+    _, tol_paths = jnph.record(f, tol=0.1)(x)
+    _, atol_paths = jnph.record(f, atol=0.1)(x)
+    assert len(tol_paths) == len(atol_paths) == 2
+
+
+def test_invalid_tolerance_arguments():
+    with pytest.raises(ValueError):
+        jnph.record(lambda x: x, tol=0.1, atol=0.1)
+    with pytest.raises(ValueError):
+        jnph.record(lambda x: x, tol_mode="invalid")
+
+
 def test_replay_value_and_grad_batch_matches_loop_max_min():
     def f_max(x):
         return jnph_np.max(x)

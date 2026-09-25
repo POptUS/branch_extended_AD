@@ -27,6 +27,9 @@ def _is_active():
 
 def _unwrap(val):
     if isinstance(val, HashTensor):
+        if val.sensitivity is not None:
+            from .HashTensor import _SensitivityTensor
+            return _SensitivityTensor(val.value, val.sensitivity)
         return val.value
     return val
 

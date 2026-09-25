@@ -1,3 +1,4 @@
+import builtins
 import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -12,7 +13,9 @@ _is_recording: ContextVar[bool] = ContextVar('_is_recording', default=False)
 _recorded_trace: ContextVar[list] = ContextVar('_recorded_trace', default=[])
 _replay_path: ContextVar[list] = ContextVar('_replay_path', default=None)
 _replay_pos: ContextVar[int] = ContextVar('_replay_pos', default=0)
-_tolerance: ContextVar[float] = ContextVar('_tolerance', default=0)
+_atol: ContextVar[float] = ContextVar('_atol', default=0)
+_rtol: ContextVar[float] = ContextVar('_rtol', default=0)
+_tol_mode: ContextVar[str] = ContextVar('_tol_mode', default='local')
 _is_vmap_replay: ContextVar[bool] = ContextVar('_is_vmap_replay', default=False)
 _vmap_trace: ContextVar[list] = ContextVar('_vmap_trace', default=None)
 _vmap_selectors: ContextVar[tuple] = ContextVar('_vmap_selectors', default=None)
@@ -348,15 +351,193 @@ class PathSet:
         return "\n".join(lines)
 
 
+class _SensitivityTensor:
+    __array_priority__ = 1000
+
+    def __init__(self, value, sensitivity=None):
+        self.value = value
+        self.sensitivity = sensitivity
+
+    def __len__(self):
+        return len(self.value)
+
+    def __getitem__(self, index):
+        if self.sensitivity is None:
+            sensitivity = None
+        elif isinstance(index, tuple):
+            sensitivity = self.sensitivity[(slice(None),) + index]
+        else:
+            sensitivity = self.sensitivity[(slice(None), index)]
+        return _SensitivityTensor(self.value[index], sensitivity)
+
+    @staticmethod
+    def _value(other):
+        return other.value if isinstance(other, _SensitivityTensor) else other
+
+    @staticmethod
+    def _sensitivity(other, value, directions):
+        if isinstance(other, _SensitivityTensor) and other.sensitivity is not None:
+            return other.sensitivity
+        return jnp.zeros((directions,) + jnp.shape(value), dtype=jnp.result_type(value, float))
+
+    def _binary(self, other, operation, sensitivity_operation):
+        other_value = self._value(other)
+        value = operation(self.value, other_value)
+        directions = _sensitivity_directions(self.sensitivity, getattr(other, "sensitivity", None))
+        if directions is None:
+            sensitivity = None
+        else:
+            left = _align_sensitivity(self._sensitivity(self, self.value, directions), value)
+            right = _align_sensitivity(self._sensitivity(other, other_value, directions), value)
+            sensitivity = sensitivity_operation(self.value, other_value, left, right)
+        return _SensitivityTensor(value, sensitivity)
+
+    def _rbinary(self, other, operation, sensitivity_operation):
+        other_value = self._value(other)
+        value = operation(other_value, self.value)
+        directions = _sensitivity_directions(getattr(other, "sensitivity", None), self.sensitivity)
+        if directions is None:
+            sensitivity = None
+        else:
+            left = _align_sensitivity(self._sensitivity(other, other_value, directions), value)
+            right = _align_sensitivity(self._sensitivity(self, self.value, directions), value)
+            sensitivity = sensitivity_operation(other_value, self.value, left, right)
+        return _SensitivityTensor(value, sensitivity)
+
+    def __add__(self, other):
+        return self._binary(other, lambda a, b: a + b, lambda a, b, da, db: da + db)
+
+    def __radd__(self, other):
+        return self._rbinary(other, lambda a, b: a + b, lambda a, b, da, db: da + db)
+
+    def __sub__(self, other):
+        return self._binary(other, lambda a, b: a - b, lambda a, b, da, db: da + db)
+
+    def __rsub__(self, other):
+        return self._rbinary(other, lambda a, b: a - b, lambda a, b, da, db: da + db)
+
+    def __mul__(self, other):
+        return self._binary(other, lambda a, b: a * b, lambda a, b, da, db: jnp.abs(b) * da + jnp.abs(a) * db)
+
+    def __rmul__(self, other):
+        return self._rbinary(other, lambda a, b: a * b, lambda a, b, da, db: jnp.abs(b) * da + jnp.abs(a) * db)
+
+    def __truediv__(self, other):
+        return self._binary(other, lambda a, b: a / b, _division_sensitivity)
+
+    def __rtruediv__(self, other):
+        return self._rbinary(other, lambda a, b: a / b, _division_sensitivity)
+
+    def __neg__(self):
+        return _SensitivityTensor(-self.value, self.sensitivity)
+
+
+def _sensitivity_directions(*sensitivities):
+    for sensitivity in sensitivities:
+        if sensitivity is not None:
+            return sensitivity.shape[0]
+    return None
+
+
+def _align_sensitivity(sensitivity, value):
+    while sensitivity.ndim < jnp.ndim(value) + 1:
+        sensitivity = jnp.expand_dims(sensitivity, -1)
+    return jnp.broadcast_to(sensitivity, (sensitivity.shape[0],) + jnp.shape(value))
+
+
+def _division_sensitivity(a, b, da, db):
+    denominator = jnp.maximum(jnp.abs(b), jnp.finfo(jnp.result_type(b, float)).eps)
+    return da / denominator + jnp.abs(a) * db / denominator ** 2
+
+
+def _sensitivity_scale(sensitivity):
+    if sensitivity is None:
+        return 0.0
+    return jnp.max(sensitivity, axis=0)
+
+
+def _tolerance(reference, sensitivity_scale=0.0):
+    tolerance = _atol.get() + _rtol.get() * jnp.abs(reference)
+    if _tol_mode.get() == "input_scaled":
+        tolerance = tolerance * sensitivity_scale
+    return tolerance
+
+
+def _near(difference, tolerance):
+    result = difference <= tolerance
+    if _tol_mode.get() == "input_scaled":
+        result = jnp.logical_and(result, tolerance > 0)
+    return result
+
+
+def _input_size(value):
+    if isinstance(value, tuple) or isinstance(value, list):
+        return builtins.sum(_input_size(item) for item in value)
+    if isinstance(value, dict):
+        return builtins.sum(_input_size(item) for item in value.values())
+    if hasattr(value, "shape"):
+        return int(jnp.size(value))
+    return 0
+
+
+def _wrap_sensitive_inputs(value, directions, position):
+    if isinstance(value, tuple):
+        wrapped = []
+        for item in value:
+            wrapped_item, position = _wrap_sensitive_inputs(item, directions, position)
+            wrapped.append(wrapped_item)
+        return tuple(wrapped), position
+    if isinstance(value, list):
+        wrapped = []
+        for item in value:
+            wrapped_item, position = _wrap_sensitive_inputs(item, directions, position)
+            wrapped.append(wrapped_item)
+        return wrapped, position
+    if isinstance(value, dict):
+        wrapped = {}
+        for key, item in value.items():
+            wrapped[key], position = _wrap_sensitive_inputs(item, directions, position)
+        return wrapped, position
+    if hasattr(value, "shape"):
+        size = int(jnp.size(value))
+        sensitivity = jnp.zeros((directions, size), dtype=jnp.result_type(value, float))
+        indices = jnp.arange(size)
+        sensitivity = sensitivity.at[position + indices, indices].set(1.0)
+        return _SensitivityTensor(value, sensitivity.reshape((directions,) + value.shape)), position + size
+    return value, position
+
+
+def _unwrap_sensitive(value):
+    if isinstance(value, _SensitivityTensor):
+        return value.value
+    if isinstance(value, tuple):
+        return tuple(_unwrap_sensitive(item) for item in value)
+    if isinstance(value, list):
+        return [_unwrap_sensitive(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _unwrap_sensitive(item) for key, item in value.items()}
+    return value
+
+
+def _resolve_tolerance(tol, atol, rtol, tol_mode):
+    if tol_mode not in {"local", "input_scaled"}:
+        raise ValueError("tol_mode must be 'local' or 'input_scaled'")
+    if atol is not None and tol != 0.0:
+        raise ValueError("Specify either tol or atol, not both")
+    return (tol if atol is None else atol), rtol, tol_mode
+
+
 @contextmanager
-def _branch_mode(mode, tol=0, replay_path=None, trace=None, selectors=None, batch_arrays=None):
-    logger.debug("Entering _branch_mode: mode=%s, tolerance=%s", mode, tol)
+def _branch_mode(mode, atol=0, rtol=0, tol_mode="local", replay_path=None, trace=None, selectors=None, batch_arrays=None):
+    logger.debug("Entering _branch_mode: mode=%s, atol=%s, rtol=%s, tol_mode=%s", mode, atol, rtol, tol_mode)
 
     rec_token = _is_recording.set(False)
     trace_token = _recorded_trace.set([])
     path_token = _replay_path.set(None)
     pos_token = _replay_pos.set(0)
-    tol_token = _tolerance.set(0)
+    atol_token = _atol.set(0)
+    rtol_token = _rtol.set(0)
+    tol_mode_token = _tol_mode.set("local")
     vmap_flag_token = _is_vmap_replay.set(False)
     vmap_trace_token = _vmap_trace.set(None)
     vmap_sel_token = _vmap_selectors.set(None)
@@ -366,7 +547,9 @@ def _branch_mode(mode, tol=0, replay_path=None, trace=None, selectors=None, batc
     try:
         if mode == "record":
             _is_recording.set(True)
-            _tolerance.set(tol)
+            _atol.set(atol)
+            _rtol.set(rtol)
+            _tol_mode.set(tol_mode)
             logger.debug("Starting recording mode")
 
             trace = _recorded_trace.get()
@@ -422,7 +605,9 @@ def _branch_mode(mode, tol=0, replay_path=None, trace=None, selectors=None, batc
         _recorded_trace.reset(trace_token)
         _replay_path.reset(path_token)
         _replay_pos.reset(pos_token)
-        _tolerance.reset(tol_token)
+        _atol.reset(atol_token)
+        _rtol.reset(rtol_token)
+        _tol_mode.reset(tol_mode_token)
         _is_vmap_replay.reset(vmap_flag_token)
         _vmap_trace.reset(vmap_trace_token)
         _vmap_selectors.reset(vmap_sel_token)
@@ -482,9 +667,13 @@ def _batch_popf(name):
 
 
 class HashTensor:
-    def __init__(self, value):
+    def __init__(self, value, sensitivity=None):
+        if isinstance(value, _SensitivityTensor):
+            sensitivity = value.sensitivity
+            value = value.value
         logger.debug("HashTensor.__init__: value=%s", value)
         self.value = value
+        self.sensitivity = sensitivity
 
     def __repr__(self):
         return f'HashTensor({self.value})'
@@ -528,7 +717,11 @@ def max(inval):
     if _is_recording.get():
         loc = jnp.argmax(inval.value)
         val = inval.value[loc]
-        nearby_locs, = jnp.where(inval.value >= val - _tolerance.get())
+        sensitivity_scale = _sensitivity_scale(inval.sensitivity)
+        selected_scale = sensitivity_scale[loc] if jnp.ndim(sensitivity_scale) else sensitivity_scale
+        scale = jnp.maximum(sensitivity_scale, selected_scale)
+        tolerance = _tolerance(val, scale)
+        nearby_locs, = jnp.where(_near(val - inval.value, tolerance))
         nearby_locs = tuple(int(x) for x in nearby_locs.tolist())
         logger.debug("max: recording - loc=%s, val=%s, nearby_locs=%s", loc, val, nearby_locs)
         _trace_append("max", nearby_locs)
@@ -546,7 +739,13 @@ def max(inval):
         loc = _trace_popf("max")
         val = inval.value[loc]
         logger.debug("max: replaying - loc=%s, val=%s", loc, val)
-    return HashTensor(val)
+    sensitivity = None
+    if inval.sensitivity is not None:
+        if _is_recording.get():
+            sensitivity = jnp.max(inval.sensitivity[(slice(None), jnp.array(nearby_locs))], axis=1)
+        else:
+            sensitivity = inval.sensitivity[(slice(None), loc)]
+    return HashTensor(val, sensitivity)
 
 
 def min(inval):
@@ -554,7 +753,11 @@ def min(inval):
     if _is_recording.get():
         loc = jnp.argmin(inval.value)
         val = inval.value[loc]
-        nearby_locs, = jnp.where(inval.value <= val + _tolerance.get())
+        sensitivity_scale = _sensitivity_scale(inval.sensitivity)
+        selected_scale = sensitivity_scale[loc] if jnp.ndim(sensitivity_scale) else sensitivity_scale
+        scale = jnp.maximum(sensitivity_scale, selected_scale)
+        tolerance = _tolerance(val, scale)
+        nearby_locs, = jnp.where(_near(inval.value - val, tolerance))
         nearby_locs = tuple(int(x) for x in nearby_locs.tolist())
         logger.debug("min: recording - loc=%s, val=%s, nearby_locs=%s", loc, val, nearby_locs)
         _trace_append("min", nearby_locs)
@@ -572,16 +775,29 @@ def min(inval):
         loc = _trace_popf("min")
         val = inval.value[loc]
         logger.debug("min: replaying - loc=%s, val=%s", loc, val)
-    return HashTensor(val)
+    sensitivity = None
+    if inval.sensitivity is not None:
+        if _is_recording.get():
+            sensitivity = jnp.max(inval.sensitivity[(slice(None), jnp.array(nearby_locs))], axis=1)
+        else:
+            sensitivity = inval.sensitivity[(slice(None), loc)]
+    return HashTensor(val, sensitivity)
 
 
 def _elementwise_minmax(one, two, name, jnp_op, prefer_first):
     logger.debug("%s: one=%s, two=%s", name, one.value, two.value)
     if _is_recording.get():
-        nearby_indices = jnp.where(jnp.abs(one.value - two.value) <= _tolerance.get())[0]
-        nearby_indices = tuple(int(x) for x in nearby_indices.tolist())
+        directions = _sensitivity_directions(one.sensitivity, two.sensitivity)
+        sensitivity = None
+        if directions is not None:
+            one_sensitivity = _SensitivityTensor._sensitivity(one, one.value, directions)
+            two_sensitivity = _SensitivityTensor._sensitivity(two, two.value, directions)
+            sensitivity = jnp.maximum(one_sensitivity, two_sensitivity)
+        reference = jnp.maximum(jnp.abs(one.value), jnp.abs(two.value))
+        near = _near(jnp.abs(one.value - two.value), _tolerance(reference, _sensitivity_scale(sensitivity)))
+        nearby_indices = tuple(int(x) for x in jnp.where(jnp.ravel(near))[0].tolist())
         logger.debug("%s: recording - nearby_indices=%s", name, nearby_indices)
-        base_pick_two = tuple(bool(x) for x in (jnp_op(one.value, two.value) == two.value).tolist())
+        base_pick_two = tuple(bool(x) for x in jnp.ravel(jnp_op(one.value, two.value) == two.value).tolist())
         # NOTE: this enumerates 2**len(nearby_indices) choices at record time (unlike
         # abs(), which was fixed in b527254 to always record exactly one choice). This
         # is a known, currently-latent risk: a maximum/minimum call over a vector with
@@ -600,22 +816,47 @@ def _elementwise_minmax(one, two, name, jnp_op, prefer_first):
         base_arr = np.array(base_pick_two)
         bits = (selector >> jnp.arange(len(nearby_indices))) & 1
         flip = jnp.zeros(m, dtype=bool).at[nearby_arr].set(bits.astype(bool))
-        pick_two = jnp.logical_xor(base_arr, flip)
+        pick_two = _reshape_pick_two(jnp.logical_xor(base_arr, flip), one.value, two.value)
         result = HashTensor(jnp.where(pick_two, two.value, one.value))
         logger.debug("%s: vmap replaying - pick_two=%s, result=%s", name, pick_two, result.value)
         return result
     elif _is_batch_replay.get():
         (pick_two,) = _batch_popf(name)
+        pick_two = _reshape_pick_two(pick_two, one.value, two.value)
         result = HashTensor(jnp.where(pick_two, two.value, one.value))
         logger.debug("%s: batch replaying - pick_two=%s, result=%s", name, pick_two, result.value)
         return result
     else:
         nearby_indices, choice_int, base_pick_two = _trace_popf(name)
-        pick_two = _resolve_pick_two(nearby_indices, choice_int, base_pick_two)
+        pick_two = _reshape_pick_two(
+            _resolve_pick_two(nearby_indices, choice_int, base_pick_two),
+            one.value,
+            two.value,
+        )
         result = HashTensor(jnp.where(pick_two, two.value, one.value))
         logger.debug("%s: replaying - pick_two=%s, result=%s", name, pick_two, result.value)
         return result
-    return HashTensor(jnp_op(one.value, two.value))
+    value = jnp_op(one.value, two.value)
+    sensitivity = None
+    directions = _sensitivity_directions(one.sensitivity, two.sensitivity)
+    if directions is not None:
+        one_sensitivity = _SensitivityTensor._sensitivity(one, one.value, directions)
+        two_sensitivity = _SensitivityTensor._sensitivity(two, two.value, directions)
+        if prefer_first:
+            selected = jnp.where(jnp.expand_dims(one.value >= two.value, 0), one_sensitivity, two_sensitivity)
+        else:
+            selected = jnp.where(jnp.expand_dims(one.value <= two.value, 0), one_sensitivity, two_sensitivity)
+        nearby = jnp.zeros_like(one.value, dtype=bool)
+        if nearby.ndim == 0:
+            nearby = jnp.asarray(len(nearby_indices) > 0)
+        elif len(nearby_indices) > 0:
+            nearby = nearby.at[jnp.array(nearby_indices)].set(True)
+        sensitivity = jnp.where(
+            jnp.expand_dims(nearby, 0),
+            jnp.maximum(one_sensitivity, two_sensitivity),
+            selected,
+        )
+    return HashTensor(value, sensitivity)
 
 
 def _resolve_pick_two(nearby_indices, choice_int, base_pick_two):
@@ -624,6 +865,11 @@ def _resolve_pick_two(nearby_indices, choice_int, base_pick_two):
         if (choice_int >> j) & 1:
             pick_two[idx] = not pick_two[idx]
     return np.array(pick_two, dtype=bool)
+
+
+def _reshape_pick_two(pick_two, one, two):
+    shape = jnp.broadcast_shapes(jnp.shape(one), jnp.shape(two))
+    return jnp.reshape(pick_two, shape)
 
 
 def maximum(one, two):
@@ -636,7 +882,11 @@ def minimum(one, two):
 
 def sum(inval):
     logger.debug("sum: input=%s", inval.value)
-    result = HashTensor(jnp.sum(inval.value))
+    sensitivity = None
+    if inval.sensitivity is not None:
+        axes = tuple(range(1, inval.sensitivity.ndim))
+        sensitivity = jnp.sum(inval.sensitivity, axis=axes)
+    result = HashTensor(jnp.sum(inval.value), sensitivity)
     logger.debug("sum: result=%s", result.value)
     return result
 
@@ -659,13 +909,14 @@ def _abs_from_choice(value, nearby_indices, base_negate):
 def abs(inval):
     logger.debug("abs: input=%s", inval.value)
     if _is_recording.get():
-        nearby_indices = jnp.where(jnp.abs(inval.value) <= _tolerance.get())[0]
+        tolerance = _tolerance(inval.value, _sensitivity_scale(inval.sensitivity))
+        nearby_indices = jnp.where(_near(jnp.abs(inval.value), tolerance))[0]
         nearby_indices = tuple(int(x) for x in nearby_indices.tolist())
         logger.debug("abs: recording - nearby_indices=%s", nearby_indices)
         base_negate = tuple(bool(x) for x in (inval.value < 0).tolist())
         choices = [(nearby_indices, base_negate)]
         _trace_append("abs", choices)
-        result = HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate))
+        result = HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate), inval.sensitivity)
         logger.debug("abs: recording - result=%s", result.value)
         return result
     elif _is_vmap_replay.get():
@@ -686,10 +937,18 @@ def abs(inval):
         return result
 
 
-def record(fun, tol=0.0):
+def record(fun, tol=0.0, *, atol=None, rtol=0.0, tol_mode="local"):
+    atol, rtol, tol_mode = _resolve_tolerance(tol, atol, rtol, tol_mode)
+
     def recorded(*args, **kwargs):
-        with _branch_mode("record", tol=tol) as trace:
-            value = fun(*args, **kwargs)
+        with _branch_mode("record", atol=atol, rtol=rtol, tol_mode=tol_mode) as trace:
+            if tol_mode == "input_scaled":
+                directions = _input_size(args) + _input_size(kwargs)
+                wrapped_args, position = _wrap_sensitive_inputs(args, directions, 0)
+                wrapped_kwargs, _ = _wrap_sensitive_inputs(kwargs, directions, position)
+                value = _unwrap_sensitive(fun(*wrapped_args, **wrapped_kwargs))
+            else:
+                value = fun(*args, **kwargs)
         paths = PathSet(trace)
         return value, paths
     return recorded
@@ -703,9 +962,9 @@ def replay(fun, path):
     return replayed
 
 
-def grad(fun, argnums=0, tol=0.0, has_aux=False):
+def grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local"):
     def grad_fn(*args, **kwargs):
-        _, paths = record(fun, tol=tol)(*args, **kwargs)
+        _, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode)(*args, **kwargs)
         default_path = paths[0]
 
         with _branch_mode("replay", replay_path=default_path):
@@ -720,9 +979,9 @@ def grad(fun, argnums=0, tol=0.0, has_aux=False):
     return grad_fn
 
 
-def value_and_grad(fun, argnums=0, tol=0.0, has_aux=False):
+def value_and_grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local"):
     def val_grad_fn(*args, **kwargs):
-        record_result, paths = record(fun, tol=tol)(*args, **kwargs)
+        record_result, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode)(*args, **kwargs)
         default_path = paths[0]
 
         if has_aux:
@@ -934,9 +1193,9 @@ def replay_value_and_grad_batch(fun, paths, argnums=0, has_aux=False):
     return batched_val_grad
 
 
-def all_value_and_grad(fun, argnums=0, tol=0.0, has_aux=False):
+def all_value_and_grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local"):
     def all_vg_fn(*args, **kwargs):
-        _defaultresult, paths = record(fun, tol=tol)(*args, **kwargs)
+        _defaultresult, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode)(*args, **kwargs)
 
         if kwargs or not paths.trace:
             jax_vg_fn = jax.value_and_grad(fun, argnums=argnums, has_aux=has_aux)
@@ -977,13 +1236,13 @@ def all_value_and_grad(fun, argnums=0, tol=0.0, has_aux=False):
     return all_vg_fn
 
 
-def h_fun(fun, argnums=0, tol=0.0, has_aux=False):
+def h_fun(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local"):
 
     def wrapped(z, H0=None):
         z_jax = jnp.asarray(z)
 
         if H0 is None:
-            defaultresult, paths = record(fun, tol=tol)(z_jax)
+            defaultresult, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode)(z_jax)
 
             if not paths.trace:
                 # No traced max/min/abs/maximum/minimum ops at all -- a single default
