@@ -3,6 +3,7 @@ import itertools
 import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass, replace
 
 import jax
 import jax.numpy as jnp
@@ -12,19 +13,24 @@ from .paths import path_key, paths_equal
 
 logger = logging.getLogger(__name__)
 
-_is_recording: ContextVar[bool] = ContextVar('_is_recording', default=False)
-_recorded_trace: ContextVar[list] = ContextVar('_recorded_trace', default=[])
-_replay_path: ContextVar[list] = ContextVar('_replay_path', default=None)
-_replay_pos: ContextVar[int] = ContextVar('_replay_pos', default=0)
-_atol: ContextVar[float] = ContextVar('_atol', default=0)
-_rtol: ContextVar[float] = ContextVar('_rtol', default=0)
-_tol_mode: ContextVar[str] = ContextVar('_tol_mode', default='local')
-_abs_policy: ContextVar[str] = ContextVar('_abs_policy', default='zero')
-_is_vmap_replay: ContextVar[bool] = ContextVar('_is_vmap_replay', default=False)
-_vmap_trace: ContextVar[list] = ContextVar('_vmap_trace', default=None)
-_vmap_selectors: ContextVar[tuple] = ContextVar('_vmap_selectors', default=None)
-_is_batch_replay: ContextVar[bool] = ContextVar('_is_batch_replay', default=False)
-_batch_arrays: ContextVar[tuple] = ContextVar('_batch_arrays', default=None)
+@dataclass(frozen=True)
+class _BranchState:
+    mode: str = "inactive"
+    trace: object = None
+    replay_path: object = None
+    replay_pos: int = 0
+    atol: float = 0.0
+    rtol: float = 0.0
+    tol_mode: str = "local"
+    abs_policy: str = "zero"
+    selectors: object = None
+    batch_arrays: object = None
+
+
+_branch_state: ContextVar[_BranchState] = ContextVar(
+    "_branch_state",
+    default=_BranchState(),
+)
 
 # Cache of jax.jit-compiled (vmap . value_and_grad) callables for
 # replay_value_and_grad_batch, keyed by (fun, op-sequence, ...) -- see
@@ -369,15 +375,16 @@ def _sensitivity_scale(sensitivity):
 
 
 def _tolerance(reference, sensitivity_scale=0.0):
-    tolerance = _atol.get() + _rtol.get() * jnp.abs(reference)
-    if _tol_mode.get() == "input_scaled":
+    state = _branch_state.get()
+    tolerance = state.atol + state.rtol * jnp.abs(reference)
+    if state.tol_mode == "input_scaled":
         tolerance = tolerance * sensitivity_scale
     return tolerance
 
 
 def _near(difference, tolerance):
     result = difference <= tolerance
-    if _tol_mode.get() == "input_scaled":
+    if _branch_state.get().tol_mode == "input_scaled":
         result = jnp.logical_and(result, tolerance > 0)
     return result
 
@@ -443,139 +450,95 @@ def _resolve_options(atol, rtol, tol_mode, abs_policy):
 def _branch_mode(mode, atol=0, rtol=0, tol_mode="local", abs_policy="zero", replay_path=None, trace=None, selectors=None, batch_arrays=None):
     logger.debug("Entering _branch_mode: mode=%s, atol=%s, rtol=%s, tol_mode=%s", mode, atol, rtol, tol_mode)
 
-    rec_token = _is_recording.set(False)
-    trace_token = _recorded_trace.set([])
-    path_token = _replay_path.set(None)
-    pos_token = _replay_pos.set(0)
-    atol_token = _atol.set(0)
-    rtol_token = _rtol.set(0)
-    tol_mode_token = _tol_mode.set("local")
-    abs_policy_token = _abs_policy.set("zero")
-    vmap_flag_token = _is_vmap_replay.set(False)
-    vmap_trace_token = _vmap_trace.set(None)
-    vmap_sel_token = _vmap_selectors.set(None)
-    batch_flag_token = _is_batch_replay.set(False)
-    batch_arrays_token = _batch_arrays.set(None)
-
-    try:
-        if mode == "record":
-            _is_recording.set(True)
-            _atol.set(atol)
-            _rtol.set(rtol)
-            _tol_mode.set(tol_mode)
-            _abs_policy.set(abs_policy)
-            logger.debug("Starting recording mode")
-
-            trace = _recorded_trace.get()
-
-            try:
-                yield trace
-            finally:
-                pass
-
-        elif mode == "replay":
-            if replay_path is None:
-                raise ValueError("replay_path must be provided in replay mode")
-
-            if isinstance(replay_path, list):
-                _replay_path.set(list(replay_path))
-            elif isinstance(replay_path, PathSet):
-                if len(replay_path) == 1:
-                    path = next(iter(replay_path))
-                    _replay_path.set(list(path))
-                else:
-                    raise ValueError("PathSet with multiple paths cannot be used directly as replay_path. Iterate over it first.")
-            else:
-                raise TypeError(f"Unexpected replay_path type: {type(replay_path)}")
-
-            _replay_pos.set(0)
-            logger.debug("Starting replay mode")
-            yield
-
-        elif mode == "vmap_replay":
-            if trace is None or selectors is None:
-                raise ValueError("trace and selectors must be provided in vmap_replay mode")
-
-            _is_vmap_replay.set(True)
-            _vmap_trace.set(trace)
-            _vmap_selectors.set(tuple(selectors))
-            _replay_pos.set(0)
-            logger.debug("Starting vmap_replay mode")
-            yield
-
-        elif mode == "batch_replay":
-            if batch_arrays is None:
-                raise ValueError("batch_arrays must be provided in batch_replay mode")
-
-            _is_batch_replay.set(True)
-            _batch_arrays.set(tuple(batch_arrays))
-            _replay_pos.set(0)
-            logger.debug("Starting batch_replay mode")
-            yield
+    state = _BranchState(mode=mode)
+    if mode == "record":
+        state = replace(
+            state,
+            trace=[],
+            atol=atol,
+            rtol=rtol,
+            tol_mode=tol_mode,
+            abs_policy=abs_policy,
+        )
+    elif mode == "replay":
+        if replay_path is None:
+            raise ValueError("replay_path must be provided in replay mode")
+        if isinstance(replay_path, list):
+            path = tuple(replay_path)
+        elif isinstance(replay_path, PathSet) and len(replay_path) == 1:
+            path = tuple(next(iter(replay_path)))
+        elif isinstance(replay_path, PathSet):
+            raise ValueError("PathSet with multiple paths cannot be used directly as replay_path. Iterate over it first.")
         else:
-            raise Exception(f"Unexpected branch recording mode {mode}.")
+            raise TypeError(f"Unexpected replay_path type: {type(replay_path)}")
+        state = replace(state, replay_path=path)
+    elif mode == "vmap_replay":
+        if trace is None or selectors is None:
+            raise ValueError("trace and selectors must be provided in vmap_replay mode")
+        state = replace(state, trace=tuple(trace), selectors=tuple(selectors))
+    elif mode == "batch_replay":
+        if batch_arrays is None:
+            raise ValueError("batch_arrays must be provided in batch_replay mode")
+        state = replace(state, batch_arrays=tuple(batch_arrays))
+    else:
+        raise ValueError(f"Unexpected branch recording mode {mode}.")
+
+    token = _branch_state.set(state)
+    try:
+        yield state.trace if mode == "record" else None
     finally:
-        _is_recording.reset(rec_token)
-        _recorded_trace.reset(trace_token)
-        _replay_path.reset(path_token)
-        _replay_pos.reset(pos_token)
-        _atol.reset(atol_token)
-        _rtol.reset(rtol_token)
-        _tol_mode.reset(tol_mode_token)
-        _abs_policy.reset(abs_policy_token)
-        _is_vmap_replay.reset(vmap_flag_token)
-        _vmap_trace.reset(vmap_trace_token)
-        _vmap_selectors.reset(vmap_sel_token)
-        _is_batch_replay.reset(batch_flag_token)
-        _batch_arrays.reset(batch_arrays_token)
+        _branch_state.reset(token)
         logger.debug("Exiting _branch_mode")
 
 
 def _trace_append(name, choices):
-    trace = _recorded_trace.get()
+    trace = _branch_state.get().trace
     logger.debug("_trace_append: name=%s, num_choices=%s", name, len(choices))
     trace.append(_TraceNode(name, choices))
 
 
 def _trace_popf(name):
-    replay = _replay_path.get()
-    pos = _replay_pos.get()
+    state = _branch_state.get()
+    replay = state.replay_path
+    pos = state.replay_pos
     if replay is None:
         raise ValueError("No path provided for replay mode")
     if pos >= len(replay):
         raise ValueError("Path exhausted")
     node = replay[pos]
-    _replay_pos.set(pos + 1)
+    _branch_state.set(replace(state, replay_pos=pos + 1))
     if node.name != name:
         raise ValueError(f"Expected trace node {name}, got {node.name}")
     return node.choices[0]
 
 
 def _trace_popf_vmap(name):
-    trace = _vmap_trace.get()
-    pos = _replay_pos.get()
-    selectors = _vmap_selectors.get()
+    state = _branch_state.get()
+    trace = state.trace
+    pos = state.replay_pos
+    selectors = state.selectors
     if trace is None:
         raise ValueError("No trace provided for vmap_replay mode")
     if pos >= len(trace):
         raise ValueError("Path exhausted")
     node = trace[pos]
     selector = selectors[pos]
-    _replay_pos.set(pos + 1)
+    _branch_state.set(replace(state, replay_pos=pos + 1))
     if node.name != name:
         raise ValueError(f"Expected trace node {name}, got {node.name}")
     return node, selector
 
 
 def _batch_popf(name):
-    arrays = _batch_arrays.get()
-    pos = _replay_pos.get()
+    state = _branch_state.get()
+    arrays = state.batch_arrays
+    pos = state.replay_pos
     if arrays is None:
         raise ValueError("No batch arrays provided for batch_replay mode")
     if pos >= len(arrays):
         raise ValueError("Batch arrays exhausted")
     entry = arrays[pos]
-    _replay_pos.set(pos + 1)
+    _branch_state.set(replace(state, replay_pos=pos + 1))
     if entry[0] != name:
         raise ValueError(f"Expected trace node {name}, got {entry[0]}")
     return entry[1:]
@@ -630,7 +593,7 @@ class _HashTensor:
 def max(inval):
     logger.debug("max: input=%s", inval.value)
     flat_value = jnp.ravel(inval.value)
-    if _is_recording.get():
+    if _branch_state.get().mode == "record":
         loc = jnp.argmax(flat_value)
         val = flat_value[loc]
         sensitivity_scale = _sensitivity_scale(inval.sensitivity)
@@ -642,13 +605,13 @@ def max(inval):
         nearby_locs = tuple(int(x) for x in nearby_locs.tolist())
         logger.debug("max: recording - loc=%s, val=%s, nearby_locs=%s", loc, val, nearby_locs)
         _trace_append("max", nearby_locs)
-    elif _is_vmap_replay.get():
+    elif _branch_state.get().mode == "vmap_replay":
         node, selector = _trace_popf_vmap("max")
         nearby_locs_arr = jnp.asarray(node.choices)
         loc = nearby_locs_arr[selector]
         val = flat_value[loc]
         logger.debug("max: vmap replaying - loc=%s, val=%s", loc, val)
-    elif _is_batch_replay.get():
+    elif _branch_state.get().mode == "batch_replay":
         (loc,) = _batch_popf("max")
         val = flat_value[loc]
         logger.debug("max: batch replaying - loc=%s, val=%s", loc, val)
@@ -658,7 +621,7 @@ def max(inval):
         logger.debug("max: replaying - loc=%s, val=%s", loc, val)
     sensitivity = None
     if inval.sensitivity is not None:
-        if _is_recording.get():
+        if _branch_state.get().mode == "record":
             flat_sensitivity = inval.sensitivity.reshape((inval.sensitivity.shape[0], -1))
             sensitivity = jnp.max(flat_sensitivity[:, jnp.array(nearby_locs)], axis=1)
         else:
@@ -669,7 +632,7 @@ def max(inval):
 def min(inval):
     logger.debug("min: input=%s", inval.value)
     flat_value = jnp.ravel(inval.value)
-    if _is_recording.get():
+    if _branch_state.get().mode == "record":
         loc = jnp.argmin(flat_value)
         val = flat_value[loc]
         sensitivity_scale = _sensitivity_scale(inval.sensitivity)
@@ -681,13 +644,13 @@ def min(inval):
         nearby_locs = tuple(int(x) for x in nearby_locs.tolist())
         logger.debug("min: recording - loc=%s, val=%s, nearby_locs=%s", loc, val, nearby_locs)
         _trace_append("min", nearby_locs)
-    elif _is_vmap_replay.get():
+    elif _branch_state.get().mode == "vmap_replay":
         node, selector = _trace_popf_vmap("min")
         nearby_locs_arr = jnp.asarray(node.choices)
         loc = nearby_locs_arr[selector]
         val = flat_value[loc]
         logger.debug("min: vmap replaying - loc=%s, val=%s", loc, val)
-    elif _is_batch_replay.get():
+    elif _branch_state.get().mode == "batch_replay":
         (loc,) = _batch_popf("min")
         val = flat_value[loc]
         logger.debug("min: batch replaying - loc=%s, val=%s", loc, val)
@@ -697,7 +660,7 @@ def min(inval):
         logger.debug("min: replaying - loc=%s, val=%s", loc, val)
     sensitivity = None
     if inval.sensitivity is not None:
-        if _is_recording.get():
+        if _branch_state.get().mode == "record":
             flat_sensitivity = inval.sensitivity.reshape((inval.sensitivity.shape[0], -1))
             sensitivity = jnp.max(flat_sensitivity[:, jnp.array(nearby_locs)], axis=1)
         else:
@@ -707,7 +670,7 @@ def min(inval):
 
 def _elementwise_minmax(one, two, name, jnp_op, prefer_first):
     logger.debug("%s: one=%s, two=%s", name, one.value, two.value)
-    if _is_recording.get():
+    if _branch_state.get().mode == "record":
         directions = _sensitivity_directions(one.sensitivity, two.sensitivity)
         sensitivity = None
         if directions is not None:
@@ -729,7 +692,7 @@ def _elementwise_minmax(one, two, name, jnp_op, prefer_first):
         n_choices = 2 ** len(nearby_indices)
         choices = [(nearby_indices, i, base_pick_two) for i in range(n_choices)]
         _trace_append(name, choices)
-    elif _is_vmap_replay.get():
+    elif _branch_state.get().mode == "vmap_replay":
         node, selector = _trace_popf_vmap(name)
         nearby_indices, _, base_pick_two = node.choices[0]
         m = len(base_pick_two)
@@ -741,7 +704,7 @@ def _elementwise_minmax(one, two, name, jnp_op, prefer_first):
         result = _HashTensor(jnp.where(pick_two, two.value, one.value))
         logger.debug("%s: vmap replaying - pick_two=%s, result=%s", name, pick_two, result.value)
         return result
-    elif _is_batch_replay.get():
+    elif _branch_state.get().mode == "batch_replay":
         (pick_two,) = _batch_popf(name)
         pick_two = _reshape_pick_two(pick_two, one.value, two.value)
         result = _HashTensor(jnp.where(pick_two, two.value, one.value))
@@ -839,13 +802,13 @@ def _abs_from_branch(value, nearby_indices, choice_int, base_negate):
 
 def abs(inval):
     logger.debug("abs: input=%s", inval.value)
-    if _is_recording.get():
+    if _branch_state.get().mode == "record":
         tolerance = _tolerance(inval.value, _sensitivity_scale(inval.sensitivity))
         nearby_indices = jnp.where(jnp.ravel(_near(jnp.abs(inval.value), tolerance)))[0]
         nearby_indices = tuple(int(x) for x in nearby_indices.tolist())
         logger.debug("abs: recording - nearby_indices=%s", nearby_indices)
         base_negate = tuple(bool(x) for x in jnp.ravel(inval.value < 0).tolist())
-        if _abs_policy.get() == "enumerate":
+        if _branch_state.get().abs_policy == "enumerate":
             choices = [
                 (nearby_indices, choice_int, base_negate)
                 for choice_int in range(2 ** len(nearby_indices))
@@ -853,14 +816,14 @@ def abs(inval):
         else:
             choices = [(nearby_indices, base_negate)]
         _trace_append("abs", choices)
-        if _abs_policy.get() == "enumerate":
+        if _branch_state.get().abs_policy == "enumerate":
             value = _abs_from_branch(inval.value, nearby_indices, 0, base_negate)
         else:
             value = _abs_from_choice(inval.value, nearby_indices, base_negate)
         result = _HashTensor(value, inval.sensitivity)
         logger.debug("abs: recording - result=%s", result.value)
         return result
-    elif _is_vmap_replay.get():
+    elif _branch_state.get().mode == "vmap_replay":
         node, selector = _trace_popf_vmap("abs")
         choice = node.choices[0]
         if len(choice) == 3:
@@ -871,7 +834,7 @@ def abs(inval):
             result = _HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate))
         logger.debug("abs: vmap replaying - result=%s", result.value)
         return result
-    elif _is_batch_replay.get():
+    elif _branch_state.get().mode == "batch_replay":
         ambiguous, negate = _batch_popf("abs")
         ambiguous = jnp.reshape(ambiguous, jnp.shape(inval.value))
         negate = jnp.reshape(negate, jnp.shape(inval.value))

@@ -2,10 +2,7 @@ from jax.numpy import *
 import jax.numpy as _jnp
 
 from .HashTensor import (
-    _is_recording,
-    _is_vmap_replay,
-    _is_batch_replay,
-    _replay_path,
+    _branch_state,
     _HashTensor,
     max as _ht_max,
     min as _ht_min,
@@ -17,12 +14,7 @@ from .HashTensor import (
 
 
 def _is_active():
-    return (
-        _is_recording.get()
-        or _replay_path.get() is not None
-        or _is_vmap_replay.get()
-        or _is_batch_replay.get()
-    )
+    return _branch_state.get().mode != "inactive"
 
 
 def _unwrap(val):
