@@ -1014,6 +1014,22 @@ def test_numpy_non_overridden_functions():
     assert jnph_np.array([1, 2, 3]).dtype == jnp.array([1, 2, 3]).dtype
 
 
+@pytest.mark.parametrize(
+    ("operation", "jax_operation"),
+    [(jnph_np.max, jnp.max), (jnph_np.min, jnp.min), (jnph_np.sum, jnp.sum)],
+)
+def test_reduction_kwargs_are_rejected_during_branch_tracing(operation, jax_operation):
+    x = jnp.ones((2, 2))
+
+    def f(x):
+        return operation(x, axis=0)
+
+    with pytest.raises(NotImplementedError, match="keyword arguments"):
+        jnph.record(f)(x)
+
+    assert jnp.allclose(operation(x, axis=0), jax_operation(x, axis=0))
+
+
 if __name__ == "__main__":
     test_maximum()
     test_minimum()
