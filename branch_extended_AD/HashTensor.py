@@ -734,14 +734,16 @@ class HashTensor:
 
 def max(inval):
     logger.debug("max: input=%s", inval.value)
+    flat_value = jnp.ravel(inval.value)
     if _is_recording.get():
-        loc = jnp.argmax(inval.value)
-        val = inval.value[loc]
+        loc = jnp.argmax(flat_value)
+        val = flat_value[loc]
         sensitivity_scale = _sensitivity_scale(inval.sensitivity)
-        selected_scale = sensitivity_scale[loc] if jnp.ndim(sensitivity_scale) else sensitivity_scale
+        flat_scale = jnp.ravel(sensitivity_scale)
+        selected_scale = flat_scale[loc] if jnp.ndim(sensitivity_scale) else sensitivity_scale
         scale = jnp.maximum(sensitivity_scale, selected_scale)
         tolerance = _tolerance(val, scale)
-        nearby_locs, = jnp.where(_near(val - inval.value, tolerance))
+        nearby_locs, = jnp.where(jnp.ravel(_near(val - inval.value, tolerance)))
         nearby_locs = tuple(int(x) for x in nearby_locs.tolist())
         logger.debug("max: recording - loc=%s, val=%s, nearby_locs=%s", loc, val, nearby_locs)
         _trace_append("max", nearby_locs)
@@ -749,35 +751,38 @@ def max(inval):
         node, selector = _trace_popf_vmap("max")
         nearby_locs_arr = jnp.asarray(node.choices)
         loc = nearby_locs_arr[selector]
-        val = inval.value[loc]
+        val = flat_value[loc]
         logger.debug("max: vmap replaying - loc=%s, val=%s", loc, val)
     elif _is_batch_replay.get():
         (loc,) = _batch_popf("max")
-        val = inval.value[loc]
+        val = flat_value[loc]
         logger.debug("max: batch replaying - loc=%s, val=%s", loc, val)
     else:
         loc = _trace_popf("max")
-        val = inval.value[loc]
+        val = flat_value[loc]
         logger.debug("max: replaying - loc=%s, val=%s", loc, val)
     sensitivity = None
     if inval.sensitivity is not None:
         if _is_recording.get():
-            sensitivity = jnp.max(inval.sensitivity[(slice(None), jnp.array(nearby_locs))], axis=1)
+            flat_sensitivity = inval.sensitivity.reshape((inval.sensitivity.shape[0], -1))
+            sensitivity = jnp.max(flat_sensitivity[:, jnp.array(nearby_locs)], axis=1)
         else:
-            sensitivity = inval.sensitivity[(slice(None), loc)]
+            sensitivity = inval.sensitivity.reshape((inval.sensitivity.shape[0], -1))[:, loc]
     return HashTensor(val, sensitivity)
 
 
 def min(inval):
     logger.debug("min: input=%s", inval.value)
+    flat_value = jnp.ravel(inval.value)
     if _is_recording.get():
-        loc = jnp.argmin(inval.value)
-        val = inval.value[loc]
+        loc = jnp.argmin(flat_value)
+        val = flat_value[loc]
         sensitivity_scale = _sensitivity_scale(inval.sensitivity)
-        selected_scale = sensitivity_scale[loc] if jnp.ndim(sensitivity_scale) else sensitivity_scale
+        flat_scale = jnp.ravel(sensitivity_scale)
+        selected_scale = flat_scale[loc] if jnp.ndim(sensitivity_scale) else sensitivity_scale
         scale = jnp.maximum(sensitivity_scale, selected_scale)
         tolerance = _tolerance(val, scale)
-        nearby_locs, = jnp.where(_near(inval.value - val, tolerance))
+        nearby_locs, = jnp.where(jnp.ravel(_near(inval.value - val, tolerance)))
         nearby_locs = tuple(int(x) for x in nearby_locs.tolist())
         logger.debug("min: recording - loc=%s, val=%s, nearby_locs=%s", loc, val, nearby_locs)
         _trace_append("min", nearby_locs)
@@ -785,22 +790,23 @@ def min(inval):
         node, selector = _trace_popf_vmap("min")
         nearby_locs_arr = jnp.asarray(node.choices)
         loc = nearby_locs_arr[selector]
-        val = inval.value[loc]
+        val = flat_value[loc]
         logger.debug("min: vmap replaying - loc=%s, val=%s", loc, val)
     elif _is_batch_replay.get():
         (loc,) = _batch_popf("min")
-        val = inval.value[loc]
+        val = flat_value[loc]
         logger.debug("min: batch replaying - loc=%s, val=%s", loc, val)
     else:
         loc = _trace_popf("min")
-        val = inval.value[loc]
+        val = flat_value[loc]
         logger.debug("min: replaying - loc=%s, val=%s", loc, val)
     sensitivity = None
     if inval.sensitivity is not None:
         if _is_recording.get():
-            sensitivity = jnp.max(inval.sensitivity[(slice(None), jnp.array(nearby_locs))], axis=1)
+            flat_sensitivity = inval.sensitivity.reshape((inval.sensitivity.shape[0], -1))
+            sensitivity = jnp.max(flat_sensitivity[:, jnp.array(nearby_locs)], axis=1)
         else:
-            sensitivity = inval.sensitivity[(slice(None), loc)]
+            sensitivity = inval.sensitivity.reshape((inval.sensitivity.shape[0], -1))[:, loc]
     return HashTensor(val, sensitivity)
 
 
@@ -870,7 +876,7 @@ def _elementwise_minmax(one, two, name, jnp_op, prefer_first):
         if nearby.ndim == 0:
             nearby = jnp.asarray(len(nearby_indices) > 0)
         elif len(nearby_indices) > 0:
-            nearby = nearby.at[jnp.array(nearby_indices)].set(True)
+            nearby = nearby.ravel().at[jnp.array(nearby_indices)].set(True).reshape(nearby.shape)
         sensitivity = jnp.where(
             jnp.expand_dims(nearby, 0),
             jnp.maximum(one_sensitivity, two_sensitivity),
@@ -918,22 +924,23 @@ def _abs_from_masks(value, ambiguous, negate):
 
 
 def _abs_from_choice(value, nearby_indices, base_negate):
-    negate = np.array(base_negate)
+    shape = jnp.shape(value)
+    negate = np.array(base_negate).reshape(-1)
     ambiguous = np.zeros(len(base_negate), dtype=bool)
     if len(nearby_indices) > 0:
         ambiguous[np.array(nearby_indices, dtype=np.intp)] = True
 
-    return _abs_from_masks(value, ambiguous, negate)
+    return _abs_from_masks(value, ambiguous.reshape(shape), negate.reshape(shape))
 
 
 def abs(inval):
     logger.debug("abs: input=%s", inval.value)
     if _is_recording.get():
         tolerance = _tolerance(inval.value, _sensitivity_scale(inval.sensitivity))
-        nearby_indices = jnp.where(_near(jnp.abs(inval.value), tolerance))[0]
+        nearby_indices = jnp.where(jnp.ravel(_near(jnp.abs(inval.value), tolerance)))[0]
         nearby_indices = tuple(int(x) for x in nearby_indices.tolist())
         logger.debug("abs: recording - nearby_indices=%s", nearby_indices)
-        base_negate = tuple(bool(x) for x in (inval.value < 0).tolist())
+        base_negate = tuple(bool(x) for x in jnp.ravel(inval.value < 0).tolist())
         choices = [(nearby_indices, base_negate)]
         _trace_append("abs", choices)
         result = HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate), inval.sensitivity)

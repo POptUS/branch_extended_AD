@@ -158,6 +158,56 @@ def test_abs_ambiguous_gradient_is_zero():
     assert jnp.allclose(g, jnp.array([0.0, -1.0, 1.0]))
 
 
+def test_multidimensional_primitives_record_replay_and_gradients():
+    x = jnp.array([[1.0, 3.0], [3.0, -2.0]])
+
+    def reduce_max(x):
+        return jnph_np.max(x)
+
+    def reduce_min(x):
+        return jnph_np.min(x)
+
+    for function, expected_value, expected_gradients in (
+        (
+            reduce_max,
+            3.0,
+            [
+                jnp.array([[0.0, 1.0], [0.0, 0.0]]),
+                jnp.array([[0.0, 0.0], [1.0, 0.0]]),
+            ],
+        ),
+        (reduce_min, -2.0, [jnp.array([[0.0, 0.0], [0.0, 1.0]])]),
+    ):
+        results, paths = jnph.all_value_and_grad(function)(x)
+        assert len(paths) == len(expected_gradients)
+        assert all(jnp.isclose(value, expected_value) for value, _ in results)
+        assert all(
+            any(jnp.allclose(gradient, expected) for expected in expected_gradients)
+            for _, gradient in results
+        )
+
+    y = jnp.array([[1.0, 2.0], [4.0, -3.0]])
+
+    def elementwise(x):
+        return jnph_np.sum(jnph_np.minimum(jnph_np.maximum(x, y), 3.0))
+
+    _, paths = jnph.record(elementwise, tol=1.0)(x)
+    for path in paths:
+        value, gradient = jnph.replay_value_and_grad(elementwise, path)(x)
+        assert jnp.ndim(value) == 0
+        assert gradient.shape == x.shape
+
+    def absolute(x):
+        return jnph_np.sum(jnph_np.abs(x))
+
+    zero_matrix = jnp.zeros((2, 2))
+    value, paths = jnph.record(absolute)(zero_matrix)
+    assert value == 0.0
+    assert len(paths.trace[-1].choices[0][0]) == zero_matrix.size
+    _, gradient = jnph.replay_value_and_grad(absolute, paths[0])(zero_matrix)
+    assert gradient.shape == zero_matrix.shape
+
+
 def test_abs_replay_at_different_point():
     def f(x):
         return jnph_np.abs(x)
