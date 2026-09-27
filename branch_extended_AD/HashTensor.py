@@ -32,10 +32,7 @@ _branch_state: ContextVar[_BranchState] = ContextVar(
     default=_BranchState(),
 )
 
-# Cache of jax.jit-compiled (vmap . value_and_grad) callables for
-# replay_value_and_grad_batch, keyed by (fun, op-sequence, ...) -- see
-# _get_jit_batched_vg below. Keyed on `fun` itself (not id(fun)) so the cache entry
-# holds a strong reference, ruling out id-reuse after GC.
+# Cache compiled batched replay functions by function and traced operation layout.
 _jit_batch_cache: dict = {}
 
 
@@ -229,6 +226,8 @@ class PathSet:
         return self._build_from_tuples(diff_paths)
 
     def format_path(self, path):
+        if not isinstance(path, list):
+            raise TypeError("path must be a list of resolved trace nodes")
         nodes = path
         if not nodes:
             return "No decision points"
@@ -682,13 +681,7 @@ def _elementwise_minmax(one, two, name, jnp_op, prefer_first):
         nearby_indices = tuple(int(x) for x in jnp.where(jnp.ravel(near))[0].tolist())
         logger.debug("%s: recording - nearby_indices=%s", name, nearby_indices)
         base_pick_two = tuple(bool(x) for x in jnp.ravel(jnp_op(one.value, two.value) == two.value).tolist())
-        # NOTE: this enumerates 2**len(nearby_indices) choices at record time (unlike
-        # abs(), which was fixed in b527254 to always record exactly one choice). This
-        # is a known, currently-latent risk: a maximum/minimum call over a vector with
-        # many simultaneous ties (e.g. create_censored_L1_loss_hfun_jax) could still
-        # explode combinatorially if ever fed through all_value_and_grad's PathSet
-        # enumeration. replay_value_and_grad_batch below is NOT affected by this, since
-        # it batches over already-resolved paths and never enumerates PathSet choices.
+        # Each nearby element contributes an independent binary branch.
         n_choices = 2 ** len(nearby_indices)
         choices = [(nearby_indices, i, base_pick_two) for i in range(n_choices)]
         _trace_append(name, choices)
@@ -1039,8 +1032,7 @@ def _get_jit_batched_vg(fun, leaf_layout, n_args, argnums, has_aux):
             return fun(*call_args)
 
     jax_vg_fn = jax.value_and_grad(vmap_body, argnums=argnums, has_aux=has_aux)
-    # NB: this module defines its own `sum` (for _HashTensor values, see below), which
-    # shadows the builtin -- use a plain loop instead of sum(...) here.
+    # This module defines its own sum, so use a loop for Python integers.
     total_leaves = 0
     for _, n_leaves in leaf_layout:
         total_leaves += n_leaves

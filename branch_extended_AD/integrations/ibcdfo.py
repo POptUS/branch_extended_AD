@@ -18,6 +18,8 @@ def h_fun(fun, argnums=0, has_aux=False, *, atol=0.0, rtol=0.0,
                 tol_mode=tol_mode,
                 abs_policy=abs_policy,
             )(z_jax)
+            if has_aux:
+                defaultresult, _ = defaultresult
 
             if not paths.trace:
                 jax_vg_fn = jax.value_and_grad(fun, argnums=argnums, has_aux=has_aux)
