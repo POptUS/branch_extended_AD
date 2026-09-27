@@ -1,4 +1,5 @@
 import builtins
+import itertools
 import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -38,10 +39,9 @@ class _TraceNode:
         self.name = name
         self.choices = list(choices)
         self.num = len(self.choices)
-        self.pos = 0
 
     def __repr__(self):
-        return f'_TraceNode(name="{self.name}", pos={self.pos}/{self.num}, current_choice={self.currentChoice()})'
+        return f'_TraceNode(name="{self.name}", choices={self.choices!r})'
 
     def __str__(self):
         return self.__repr__()
@@ -50,21 +50,6 @@ class _TraceNode:
         if not isinstance(other, _TraceNode):
             return NotImplemented
         return self.name == other.name and self.choices == other.choices
-
-    def currentChoice(self):
-        choice = self.choices[self.pos]
-        logger.debug("_TraceNode.currentChoice: name=%s, pos=%s, choice=%s", self.name, self.pos, choice)
-        return choice
-
-    def incrementChoice(self):
-        logger.debug("_TraceNode.incrementChoice: name=%s, pos=%s, num=%s", self.name, self.pos, self.num)
-        if self.pos + 1 >= self.num:
-            self.pos = 0
-            return False
-        else:
-            self.pos += 1
-            return True
-
 
 class PathSet:
     def __init__(self, trace, _empty=False, _explicit_paths=None):
@@ -84,22 +69,8 @@ class PathSet:
             yield []
             return
 
-        for node in self.trace:
-            node.pos = 0
-
-        yield self._current_path()
-
-        while self._increment_trace():
-            yield self._current_path()
-
-    def _current_path(self):
-        return [_TraceNode(node.name, [node.currentChoice()]) for node in self.trace]
-
-    def _increment_trace(self):
-        for i in reversed(range(len(self.trace))):
-            if self.trace[i].incrementChoice():
-                return True
-        return False
+        for choices in itertools.product(*(node.choices for node in self.trace)):
+            yield [_TraceNode(node.name, [choice]) for node, choice in zip(self.trace, choices)]
 
     def _iter_positions(self):
         if self._explicit_paths is not None:
@@ -110,13 +81,7 @@ class PathSet:
             yield ()
             return
 
-        for node in self.trace:
-            node.pos = 0
-
-        yield tuple(node.pos for node in self.trace)
-
-        while self._increment_trace():
-            yield tuple(node.pos for node in self.trace)
+        yield from itertools.product(*(range(node.num) for node in self.trace))
 
     def __len__(self):
         if self._explicit_paths is not None:
@@ -145,18 +110,19 @@ class PathSet:
         if not self.trace:
             return []
 
-        trace_copy = [_TraceNode(node.name, node.choices) for node in self.trace]
-
         remaining_index = index
-        for i in range(len(trace_copy)):
-            node = trace_copy[i]
+        positions = []
+        for i, node in enumerate(self.trace):
             combinations_after = 1
-            for j in range(i + 1, len(trace_copy)):
-                combinations_after *= trace_copy[j].num
-            node.pos = remaining_index // combinations_after
+            for later_node in self.trace[i + 1:]:
+                combinations_after *= later_node.num
+            positions.append(remaining_index // combinations_after)
             remaining_index = remaining_index % combinations_after
 
-        return [_TraceNode(node.name, [node.currentChoice()]) for node in trace_copy]
+        return [
+            _TraceNode(node.name, [node.choices[position]])
+            for node, position in zip(self.trace, positions)
+        ]
 
     def __contains__(self, item):
         if isinstance(item, list):

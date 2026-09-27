@@ -434,6 +434,28 @@ def test_path_set_random_access():
     print("✓ Random access test passed!")
 
 
+def test_path_set_iterators_are_independent():
+    trace = [
+        ht._TraceNode("a", [0, 1]),
+        ht._TraceNode("b", ["x", "y"]),
+    ]
+    paths = jnph.PathSet(trace)
+    first = iter(paths)
+    assert path_key(next(first)) == (("a", 0), ("b", "x"))
+
+    nested = list(paths)
+    expected = [
+        (("a", 0), ("b", "x")),
+        (("a", 0), ("b", "y")),
+        (("a", 1), ("b", "x")),
+        (("a", 1), ("b", "y")),
+    ]
+    assert [path_key(path) for path in nested] == expected
+    assert path_key(next(first)) == (("a", 0), ("b", "y"))
+    assert [path_key(path) for path in paths] == expected
+    assert all(not hasattr(node, "pos") for node in trace)
+
+
 def test_record_and_replay():
     x1 = jnp.array([1.0, 2.0, 2.5])
     x2 = jnp.array([0.95, 1.5, 3.0])
