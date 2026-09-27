@@ -1,5 +1,4 @@
 from .HashTensor import (
-    HashTensor,
     PathSet,
     record,
     replay,
@@ -9,9 +8,4 @@ from .HashTensor import (
     replay_value_and_grad,
     replay_value_and_grad_batch,
     all_value_and_grad,
-    path_key,
-    paths_equal,
-    unique_paths,
-    paths_any_in,
-    paths_all_in,
 )

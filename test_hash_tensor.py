@@ -10,10 +10,8 @@ import pytest
 import branch_extended_AD as jnph
 import branch_extended_AD.numpy as jnph_np
 from branch_extended_AD.integrations.ibcdfo import h_fun
+from branch_extended_AD.paths import path_key, paths_equal
 
-# branch_extended_AD/__init__.py does `from .HashTensor import HashTensor` (the class), which
-# shadows the `branch_extended_AD.HashTensor` submodule attribute on the package -- import via
-# importlib to reach private module-level helpers like `_bucket_size`.
 ht = importlib.import_module("branch_extended_AD.HashTensor")
 
 
@@ -24,7 +22,7 @@ def test_maximum():
     def f(x, y):
         return jnph_np.maximum(x, y)
 
-    val, paths = jnph.record(f, tol=0.1)(x1, x2)
+    val, paths = jnph.record(f, atol=0.1)(x1, x2)
     assert jnp.allclose(val, jnp.array([1.0, 2.0, 3.0])), f"Expected [1.0, 2.0, 3.0], got {val}"
     assert len(paths) == 1
 
@@ -33,7 +31,7 @@ def test_maximum():
 
     x2b = jnp.array([0.95, 1.5, 3.0])
 
-    val, paths = jnph.record(f, tol=0.1)(x1, x2b)
+    val, paths = jnph.record(f, atol=0.1)(x1, x2b)
     assert jnp.allclose(val[1:], jnp.array([2.0, 3.0]))
     assert val[0] in [1.0, 0.95], f"Expected first value to be 1.0 or 0.95, got {val[0]}"
     assert len(paths) == 2
@@ -51,7 +49,7 @@ def test_maximum():
 
     x2c = jnp.array([0.95, 1.95, 2.45])
 
-    val, paths = jnph.record(f, tol=0.1)(x1, x2c)
+    val, paths = jnph.record(f, atol=0.1)(x1, x2c)
     for i in range(3):
         assert val[i] in [x1[i], x2c[i]]
     assert len(paths) == 8
@@ -75,7 +73,7 @@ def test_minimum():
     def f(x, y):
         return jnph_np.minimum(x, y)
 
-    val, paths = jnph.record(f, tol=0.1)(x1, x2)
+    val, paths = jnph.record(f, atol=0.1)(x1, x2)
     assert jnp.allclose(val, jnp.array([0.5, 1.5, 2.5]))
     assert len(paths) == 1
 
@@ -84,7 +82,7 @@ def test_minimum():
 
     x2b = jnp.array([1.05, 1.5, 3.0])
 
-    val, paths = jnph.record(f, tol=0.1)(x1, x2b)
+    val, paths = jnph.record(f, atol=0.1)(x1, x2b)
     assert jnp.allclose(val[1:], jnp.array([1.5, 2.5]))
     assert val[0] in [1.0, 1.05]
     assert len(paths) == 2
@@ -102,7 +100,7 @@ def test_minimum():
 
     x2c = jnp.array([1.05, 2.05, 2.55])
 
-    val, paths = jnph.record(f, tol=0.1)(x1, x2c)
+    val, paths = jnph.record(f, atol=0.1)(x1, x2c)
     for i in range(3):
         assert val[i] in [x1[i], x2c[i]]
     assert len(paths) == 8
@@ -124,7 +122,7 @@ def test_abs():
         return jnph_np.abs(x)
 
     x = jnp.array([-1.0, -2.0, 2.5])
-    val, paths = jnph.record(f, tol=0.1)(x)
+    val, paths = jnph.record(f, atol=0.1)(x)
     assert jnp.allclose(val, jnp.array([1.0, 2.0, 2.5]))
     assert len(paths) == 1
 
@@ -132,7 +130,7 @@ def test_abs():
     assert jnp.allclose(replayed, jnp.array([1.0, 2.0, 2.5]))
 
     x2 = jnp.array([0.05, -2.0, 2.5])
-    val, paths = jnph.record(f, tol=0.1)(x2)
+    val, paths = jnph.record(f, atol=0.1)(x2)
     assert val[0] == 0.05
     assert jnp.allclose(val[1:], jnp.array([2.0, 2.5]))
     assert len(paths) == 1
@@ -141,7 +139,7 @@ def test_abs():
     assert jnp.allclose(replayed, jnp.array([0.05, 2.0, 2.5]))
 
     x3 = jnp.array([0.05, -0.05, 0.03])
-    val, paths = jnph.record(f, tol=0.1)(x3)
+    val, paths = jnph.record(f, atol=0.1)(x3)
     assert len(paths) == 1
     assert jnp.allclose(val, jnp.array([0.05, 0.05, 0.03]))
 
@@ -154,7 +152,7 @@ def test_abs_ambiguous_gradient_is_zero():
         return jnph_np.sum(jnph_np.abs(x))
 
     x = jnp.array([0.05, -2.0, 2.5])
-    g, paths = jnph.grad(f, tol=0.1)(x)
+    g, paths = jnph.grad(f, atol=0.1)(x)
     assert len(paths) == 1
     assert jnp.allclose(g, jnp.array([0.0, -1.0, 1.0]))
 
@@ -223,7 +221,7 @@ def test_multidimensional_primitives_record_replay_and_gradients():
     def elementwise(x):
         return jnph_np.sum(jnph_np.minimum(jnph_np.maximum(x, y), 3.0))
 
-    _, paths = jnph.record(elementwise, tol=1.0)(x)
+    _, paths = jnph.record(elementwise, atol=1.0)(x)
     for path in paths:
         value, gradient = jnph.replay_value_and_grad(elementwise, path)(x)
         assert jnp.ndim(value) == 0
@@ -245,7 +243,7 @@ def test_abs_replay_at_different_point():
         return jnph_np.abs(x)
 
     x = jnp.array([0.05, -2.0, 2.5])
-    _, paths = jnph.record(f, tol=0.1)(x)
+    _, paths = jnph.record(f, atol=0.1)(x)
     path = paths[0]
 
     x_prime = jnp.array([0.03, 2.0, 2.5])
@@ -255,7 +253,7 @@ def test_abs_replay_at_different_point():
     def f_sum(x):
         return jnph_np.sum(jnph_np.abs(x))
 
-    _, sum_paths = jnph.record(f_sum, tol=0.1)(x)
+    _, sum_paths = jnph.record(f_sum, atol=0.1)(x)
     sum_path = sum_paths[0]
     v, g = jnph.replay_value_and_grad(f_sum, sum_path)(x_prime)
     assert jnp.allclose(v, 0.03 - 2.0 + 2.5)
@@ -271,8 +269,8 @@ def test_path_set_operations():
         r2 = jnph_np.abs(y)
         return jnph_np.sum(r2)
 
-    _, tight_paths = jnph.record(f, tol=0.01)(arr1, arr2)
-    _, loose_paths = jnph.record(f, tol=0.1)(arr1, arr2)
+    _, tight_paths = jnph.record(f, atol=0.01)(arr1, arr2)
+    _, loose_paths = jnph.record(f, atol=0.1)(arr1, arr2)
 
     print(f"Tight tolerance: {len(tight_paths)} paths")
     print(f"Loose tolerance: {len(loose_paths)} paths")
@@ -289,14 +287,14 @@ def test_path_set_operations():
     print(f"Difference (loose - tight): {len(diff_set)} paths")
 
     for path in tight_paths:
-        assert path in union_set or any(jnph.PathSet._paths_equal(path, u) for u in union_set)
+        assert path in union_set or any(paths_equal(path, u) for u in union_set)
 
     for path in loose_paths:
-        assert path in union_set or any(jnph.PathSet._paths_equal(path, u) for u in union_set)
+        assert path in union_set or any(paths_equal(path, u) for u in union_set)
 
     for path in intersection_set:
-        in_tight = path in tight_paths or any(jnph.PathSet._paths_equal(path, t) for t in tight_paths)
-        in_loose = path in loose_paths or any(jnph.PathSet._paths_equal(path, l) for l in loose_paths)
+        in_tight = path in tight_paths or any(paths_equal(path, t) for t in tight_paths)
+        in_loose = path in loose_paths or any(paths_equal(path, l) for l in loose_paths)
         assert in_tight and in_loose, "Intersection element should be in both sets"
 
     print("All set operations tests passed!")
@@ -309,18 +307,18 @@ def test_path_set_operations_preserve_correlated_paths():
             ht._TraceNode("b", [b]),
         ]
 
-    first = jnph.PathSet([], _explicit_paths=[jnph.path_key(path(0, 0))])
-    second = jnph.PathSet([], _explicit_paths=[jnph.path_key(path(1, 1))])
+    first = jnph.PathSet([], _explicit_paths=[path_key(path(0, 0))])
+    second = jnph.PathSet([], _explicit_paths=[path_key(path(1, 1))])
 
     union = first.union(second)
-    assert {jnph.path_key(item) for item in union} == {
-        jnph.path_key(path(0, 0)),
-        jnph.path_key(path(1, 1)),
+    assert {path_key(item) for item in union} == {
+        path_key(path(0, 0)),
+        path_key(path(1, 1)),
     }
     assert len(union) == 2
     assert len(first.intersection(second)) == 0
-    assert {jnph.path_key(item) for item in union.difference(first)} == {
-        jnph.path_key(path(1, 1)),
+    assert {path_key(item) for item in union.difference(first)} == {
+        path_key(path(1, 1)),
     }
 
 
@@ -333,7 +331,7 @@ def test_path_set_with_no_tolerance():
     def f(x, y):
         return jnph_np.maximum(x, y)
 
-    val, paths = jnph.record(f, tol=0.1)(x1, x2)
+    val, paths = jnph.record(f, atol=0.1)(x1, x2)
     assert len(paths) == 1
 
     path_list = list(paths)
@@ -355,7 +353,7 @@ def test_path_set_membership():
     def f(x, y):
         return jnph_np.maximum(x, y)
 
-    _, paths = jnph.record(f, tol=0.1)(x1, x2)
+    _, paths = jnph.record(f, atol=0.1)(x1, x2)
     assert len(paths) == 4
 
     iteration1 = list(paths)
@@ -366,7 +364,7 @@ def test_path_set_membership():
 
     valid_results = set()
     for i, p in enumerate(iteration1):
-        _, fresh_paths = jnph.record(f, tol=0.1)(x1, x2)
+        _, fresh_paths = jnph.record(f, atol=0.1)(x1, x2)
         fresh_list = list(fresh_paths)
 
         replay_result = jnph.replay(f, fresh_list[i])(x1, x2)
@@ -392,7 +390,7 @@ def test_path_set_random_access():
     def f(x, y):
         return jnph_np.maximum(x, y)
 
-    _, paths = jnph.record(f, tol=0.1)(x1, x2)
+    _, paths = jnph.record(f, atol=0.1)(x1, x2)
     assert len(paths) == 4
 
     accessed = []
@@ -405,7 +403,7 @@ def test_path_set_random_access():
     assert len(accessed) == len(iteration)
 
     for i, (a, it) in enumerate(zip(accessed, iteration)):
-        assert jnph.PathSet._paths_equal(a, it), \
+        assert paths_equal(a, it), \
             f"Path at index {i} should be the same from random access and iteration"
 
     assert paths[-1] == paths[3]
@@ -443,7 +441,7 @@ def test_record_and_replay():
     def f(x, y):
         return jnph_np.maximum(x, y)
 
-    val, paths = jnph.record(f, tol=0.1)(x1, x2)
+    val, paths = jnph.record(f, atol=0.1)(x1, x2)
     assert isinstance(paths, jnph.PathSet)
     assert len(paths) == 2
 
@@ -468,7 +466,7 @@ def test_record_no_tolerance():
     def f(x):
         return jnph_np.max(x)
 
-    val, paths = jnph.record(f, tol=0.0)(x)
+    val, paths = jnph.record(f, atol=0.0)(x)
     assert len(paths) == 1
     assert float(val) == 10.0
 
@@ -479,7 +477,7 @@ def test_grad_simple():
     def f(x):
         return jnph_np.max(x)
 
-    g, paths = jnph.grad(f, tol=0.0)(x)
+    g, paths = jnph.grad(f, atol=0.0)(x)
     assert g.shape == x.shape
     assert jnp.allclose(g, jnp.array([0.0, 1.0, 0.0])), f"Expected [0, 1, 0], got {g}"
     assert len(paths) == 1
@@ -491,7 +489,7 @@ def test_grad_with_tolerance():
     def f(x):
         return jnph_np.max(x)
 
-    g, paths = jnph.grad(f, tol=0.1)(x)
+    g, paths = jnph.grad(f, atol=0.1)(x)
     assert len(paths) == 2
     assert g.shape == x.shape
 
@@ -502,7 +500,7 @@ def test_value_and_grad_simple():
     def f(x):
         return jnph_np.sum(x)
 
-    (val, g), paths = jnph.value_and_grad(f, tol=0.0)(x)
+    (val, g), paths = jnph.value_and_grad(f, atol=0.0)(x)
     assert jnp.allclose(val, 6.0)
     assert jnp.allclose(g, jnp.array([1.0, 1.0, 1.0])), f"Expected [1, 1, 1], got {g}"
     assert len(paths) == 1
@@ -515,7 +513,7 @@ def test_value_and_grad_maximum():
     def f(x, y):
         return jnph_np.sum(jnph_np.maximum(x, y))
 
-    (val, g), paths = jnph.value_and_grad(f, argnums=0, tol=0.0)(x, y)
+    (val, g), paths = jnph.value_and_grad(f, argnums=0, atol=0.0)(x, y)
     assert float(val) == 1.5 + 2.0 + 3.0
     assert jnp.allclose(g, jnp.array([0.0, 1.0, 1.0])), f"Expected [0, 1, 1], got {g}"
 
@@ -526,7 +524,7 @@ def test_replay_grad():
     def f(x):
         return jnph_np.max(x)
 
-    _, paths = jnph.record(f, tol=0.1)(x)
+    _, paths = jnph.record(f, atol=0.1)(x)
     assert len(paths) >= 2
 
     grads = []
@@ -545,7 +543,7 @@ def test_replay_value_and_grad():
     def f(x, y):
         return jnph_np.sum(jnph_np.maximum(x, y))
 
-    _, paths = jnph.record(f, tol=0.1)(x, y)
+    _, paths = jnph.record(f, atol=0.1)(x, y)
 
     for p in paths:
         replayed_val = jnph.replay(f, p)(x, y)
@@ -561,13 +559,13 @@ def test_grad_argnums():
     def f(x, y):
         return jnph_np.sum(jnph_np.maximum(x, y))
 
-    g_x, _ = jnph.grad(f, argnums=0, tol=0.0)(x, y)
+    g_x, _ = jnph.grad(f, argnums=0, atol=0.0)(x, y)
     assert jnp.allclose(g_x, jnp.array([0.0, 1.0, 1.0]))
 
-    g_y, _ = jnph.grad(f, argnums=1, tol=0.0)(x, y)
+    g_y, _ = jnph.grad(f, argnums=1, atol=0.0)(x, y)
     assert jnp.allclose(g_y, jnp.array([1.0, 0.0, 0.0]))
 
-    (g_x2, g_y2), _ = jnph.grad(f, argnums=(0, 1), tol=0.0)(x, y)
+    (g_x2, g_y2), _ = jnph.grad(f, argnums=(0, 1), atol=0.0)(x, y)
     assert jnp.allclose(g_x2, g_x)
     assert jnp.allclose(g_y2, g_y)
 
@@ -582,12 +580,12 @@ def test_has_aux():
         aux = {"max_val": jnph_np.max(result)}
         return s, aux
 
-    (g, aux), paths = jnph.grad(f_aux, argnums=0, tol=0.0, has_aux=True)(x, y)
+    (g, aux), paths = jnph.grad(f_aux, argnums=0, atol=0.0, has_aux=True)(x, y)
     assert "max_val" in aux
     assert g.shape == x.shape
     assert jnp.allclose(g, jnp.array([0.0, 1.0, 1.0]))
 
-    (val, g2, aux2), paths2 = jnph.value_and_grad(f_aux, argnums=0, tol=0.0, has_aux=True)(x, y)
+    ((val, aux2), g2), paths2 = jnph.value_and_grad(f_aux, argnums=0, atol=0.0, has_aux=True)(x, y)
     assert float(val) == 1.5 + 2.0 + 3.0
     assert jnp.allclose(g2, g)
     assert "max_val" in aux2
@@ -602,14 +600,14 @@ def test_replay_grad_has_aux():
         s = jnph_np.sum(result)
         return s, {"count": len(x)}
 
-    _, paths = jnph.record(f_aux, tol=0.1)(x, y)
+    _, paths = jnph.record(f_aux, atol=0.1)(x, y)
 
     for p in paths:
         g, aux = jnph.replay_grad(f_aux, p, argnums=0, has_aux=True)(x, y)
         assert g.shape == x.shape
         assert aux["count"] == 3
 
-        v, g2, aux2 = jnph.replay_value_and_grad(f_aux, p, argnums=0, has_aux=True)(x, y)
+        (v, aux2), g2 = jnph.replay_value_and_grad(f_aux, p, argnums=0, has_aux=True)(x, y)
         assert jnp.allclose(g, g2)
         assert aux2["count"] == 3
 
@@ -621,7 +619,7 @@ def test_path_types():
     def f(x, y):
         return jnph_np.maximum(x, y)
 
-    _, paths = jnph.record(f, tol=0.1)(x1, x2)
+    _, paths = jnph.record(f, atol=0.1)(x1, x2)
 
     assert isinstance(paths, jnph.PathSet)
     assert len(paths) == 4
@@ -644,8 +642,8 @@ def test_branch_path_equality():
     def f(x, y):
         return jnph_np.maximum(x, y)
 
-    _, paths1 = jnph.record(f, tol=0.1)(x1, x2)
-    _, paths2 = jnph.record(f, tol=0.1)(x1, x2)
+    _, paths1 = jnph.record(f, atol=0.1)(x1, x2)
+    _, paths2 = jnph.record(f, atol=0.1)(x1, x2)
 
     for p1, p2 in zip(paths1, paths2):
         assert p1 == p2
@@ -660,7 +658,7 @@ def test_all_value_and_grad_simple():
     def f(x):
         return jnph_np.max(x)
 
-    results, paths = jnph.all_value_and_grad(f, tol=0.0)(x)
+    results, paths = jnph.all_value_and_grad(f, atol=0.0)(x)
     assert len(results) == 1
     assert len(paths) == 1
     val, grad = results[0]
@@ -674,7 +672,7 @@ def test_all_value_and_grad_with_tolerance():
     def f(x):
         return jnph_np.max(x)
 
-    results, paths = jnph.all_value_and_grad(f, tol=0.1)(x)
+    results, paths = jnph.all_value_and_grad(f, atol=0.1)(x)
     assert len(paths) == 2
     assert len(results) == 2
 
@@ -695,7 +693,7 @@ def test_all_value_and_grad_matches_manual():
     def f(x, y):
         return jnph_np.sum(jnph_np.maximum(x, y))
 
-    results, paths = jnph.all_value_and_grad(f, argnums=0, tol=0.1)(x, y)
+    results, paths = jnph.all_value_and_grad(f, argnums=0, atol=0.1)(x, y)
 
     for i, path in enumerate(paths):
         manual_v, manual_g = jnph.replay_value_and_grad(f, path, argnums=0)(x, y)
@@ -713,10 +711,10 @@ def test_all_value_and_grad_has_aux():
         s = jnph_np.sum(result)
         return s, {"count": len(x)}
 
-    results, paths = jnph.all_value_and_grad(f_aux, argnums=0, tol=0.1, has_aux=True)(x, y)
+    results, paths = jnph.all_value_and_grad(f_aux, argnums=0, atol=0.1, has_aux=True)(x, y)
     assert len(results) == len(paths)
 
-    for val, grad, aux in results:
+    for (val, aux), grad in results:
         assert aux["count"] == 3
         assert grad.shape == x.shape
 
@@ -728,12 +726,12 @@ def test_all_value_and_grad_argnums():
     def f(x, y):
         return jnph_np.sum(jnph_np.maximum(x, y))
 
-    results_x, _ = jnph.all_value_and_grad(f, argnums=0, tol=0.0)(x, y)
+    results_x, _ = jnph.all_value_and_grad(f, argnums=0, atol=0.0)(x, y)
     assert len(results_x) == 1
     val, g_x = results_x[0]
     assert jnp.allclose(g_x, jnp.array([0.0, 1.0, 1.0]))
 
-    results_y, _ = jnph.all_value_and_grad(f, argnums=1, tol=0.0)(x, y)
+    results_y, _ = jnph.all_value_and_grad(f, argnums=1, atol=0.0)(x, y)
     val, g_y = results_y[0]
     assert jnp.allclose(g_y, jnp.array([1.0, 0.0, 0.0]))
 
@@ -793,22 +791,35 @@ def test_input_scaled_tolerance_avoids_flat_region_overbranching():
     assert len(scaled_edge_nearby) > len(scaled_center_nearby)
 
 
-def test_existing_tol_is_backward_compatible_with_atol():
-    x = jnp.array([1.0, 1.05, 0.5])
-
-    def f(x):
-        return jnph_np.max(x)
-
-    _, tol_paths = jnph.record(f, tol=0.1)(x)
-    _, atol_paths = jnph.record(f, atol=0.1)(x)
-    assert len(tol_paths) == len(atol_paths) == 2
-
-
 def test_invalid_tolerance_arguments():
     with pytest.raises(ValueError):
-        jnph.record(lambda x: x, tol=0.1, atol=0.1)
-    with pytest.raises(ValueError):
         jnph.record(lambda x: x, tol_mode="invalid")
+
+
+def test_clean_public_api_exports():
+    assert not isinstance(jnph.HashTensor, type)
+    assert not hasattr(jnph, "_HashTensor")
+    assert not hasattr(jnph, "h_fun")
+    assert not hasattr(jnph, "path_key")
+
+
+def test_value_and_grad_has_aux_matches_jax_nesting():
+    def f(x):
+        return jnph_np.max(x), {"size": x.size}
+
+    x = jnp.array([1.0, 2.0])
+    ((value, aux), gradient), paths = jnph.value_and_grad(f, has_aux=True)(x)
+    assert value == 2.0
+    assert aux == {"size": 2}
+    assert jnp.allclose(gradient, jnp.array([0.0, 1.0]))
+
+    replay_result = jnph.replay_value_and_grad(f, paths[0], has_aux=True)(x)
+    assert replay_result[0][1] == aux
+    assert jnp.allclose(replay_result[1], gradient)
+
+    results, _ = jnph.all_value_and_grad(f, has_aux=True)(x)
+    assert results[0][0][1] == aux
+    assert jnp.allclose(results[0][1], gradient)
 
 
 def test_replay_value_and_grad_batch_matches_loop_max_min():
@@ -826,7 +837,7 @@ def test_replay_value_and_grad_batch_matches_loop_max_min():
             jnp.array([5.0, 1.0, 5.0]),
             jnp.array([0.0, -1.0, 2.0]),
         ]
-        paths = [list(jnph.record(f, tol=0.0)(x)[1])[0] for x in xs]
+        paths = [list(jnph.record(f, atol=0.0)(x)[1])[0] for x in xs]
 
         values, grads = jnph.replay_value_and_grad_batch(f, paths)(z)
         for k, path in enumerate(paths):
@@ -844,7 +855,7 @@ def test_replay_value_and_grad_batch_matches_loop_abs():
         jnp.array([-3.0, 0.5, 0.5, -0.001, 4.0]),
         jnp.array([2.0, 2.0, 2.0, 2.0, 2.0]),
     ]
-    paths = [list(jnph.record(f, tol=0.01)(x)[1])[0] for x in xs]
+    paths = [list(jnph.record(f, atol=0.01)(x)[1])[0] for x in xs]
     z = jnp.array([1.0, -2.0, 0.5, 3.0, -0.2])
 
     values, grads = jnph.replay_value_and_grad_batch(f, paths)(z)
@@ -860,7 +871,7 @@ def test_replay_value_and_grad_batch_matches_loop_maximum_minimum():
 
     x = jnp.array([1.0, 2.0, 3.0])
     y = jnp.array([1.05, 1.95, 3.05])
-    _, path_set = jnph.record(f, tol=0.1)(x, y)
+    _, path_set = jnph.record(f, atol=0.1)(x, y)
     paths = list(path_set)
     assert len(paths) > 1
 
@@ -881,7 +892,7 @@ def test_replay_value_and_grad_batch_large_J_no_blowup():
 
     n = 44
     x = jnp.ones(n) * 5.0
-    _, path_set = jnph.record(f, tol=0.0)(x)
+    _, path_set = jnph.record(f, atol=0.0)(x)
     paths = list(path_set)
     assert len(paths) == n
 
@@ -911,7 +922,7 @@ def test_replay_value_and_grad_batch_padding_matches_unpadded():
 
     for J in (3, 5, 6, 7):
         xs = [jnp.asarray(np.random.RandomState(i).rand(n)) for i in range(J)]
-        paths = [list(jnph.record(f, tol=0.0)(x)[1])[0] for x in xs]
+        paths = [list(jnph.record(f, atol=0.0)(x)[1])[0] for x in xs]
 
         values, grads = jnph.replay_value_and_grad_batch(f, paths)(z)
         assert values.shape == (J,)
@@ -931,12 +942,12 @@ def test_replay_value_and_grad_batch_mismatched_paths_raises():
         return jnph_np.sum(jnph_np.maximum(y, z))
 
     x = jnp.array([1.0, 3.0, 2.0])
-    _, max_paths = jnph.record(f_max, tol=0.0)(x)
+    _, max_paths = jnph.record(f_max, atol=0.0)(x)
     max_path = list(max_paths)[0]
 
     y = jnp.array([1.0, 3.0])
     z = jnp.array([1.0, 3.0])
-    _, maximum_paths = jnph.record(f_maximum, tol=0.5)(y, z)
+    _, maximum_paths = jnph.record(f_maximum, atol=0.5)(y, z)
     maximum_path = list(maximum_paths)[0]
 
     with pytest.raises(ValueError):
@@ -947,7 +958,7 @@ def test_h_fun_batch_replay_matches_loop():
     def f(x):
         return jnph_np.sum(jnph_np.abs(x)) + jnph_np.max(x)
 
-    hfun = h_fun(f, tol=0.01)
+    hfun = h_fun(f, atol=0.01)
     z = np.array([1.0, -0.5, 0.005, 2.0, -0.005])
 
     defaultresult, grads0, paths = hfun(z)
@@ -972,7 +983,7 @@ def test_h_fun_record_branch_matches_manual():
     def f(x):
         return jnph_np.max(x)
 
-    hfun = h_fun(f, tol=0.1)
+    hfun = h_fun(f, atol=0.1)
     z = np.array([1.0, 1.05, 0.5])
 
     defaultresult, grads, paths = hfun(z)
@@ -994,7 +1005,7 @@ def test_h_fun_record_branch_cache_correctness_across_different_ties():
     def f(x):
         return jnph_np.max(x)
 
-    hfun = h_fun(f, tol=0.0)
+    hfun = h_fun(f, atol=0.0)
 
     z1 = np.array([1.0, 1.0, 1.0, 0.0])  # 3-way tie -> npaths=3
     _, grads1, paths1 = hfun(z1)

@@ -7,6 +7,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from .paths import path_key, paths_equal
+
 logger = logging.getLogger(__name__)
 
 _is_recording: ContextVar[bool] = ContextVar('_is_recording', default=False)
@@ -62,79 +64,6 @@ class _TraceNode:
         else:
             self.pos += 1
             return True
-
-
-def path_key(path):
-    """Canonical hashable key for a single resolved path or other Hash entry.
-
-    A "path" is a list of `_TraceNode`, each already narrowed to exactly one
-    choice -- e.g. an element yielded by iterating a `PathSet`, or `PathSet[i]`.
-    `_TraceNode` defines `__eq__` but not `__hash__`, so a bare `_TraceNode`
-    (and any list containing one) is unhashable in plain Python: `set()`/`dict`
-    keyed on paths, or a `path in some_list` check, silently falls back to an
-    O(n) linear scan (or raises `TypeError` if you try to hash it directly).
-    `path_key` gives callers a plain tuple of hashable primitives (the trace
-    node names and their resolved choices, which `_branch_mode` always builds
-    out of ints/bools/tuples) so raw paths can be deduplicated or tested for
-    membership in O(1) amortized per path instead of O(n).
-
-    Non-path Hash entries -- e.g. a hand-coded hfun's plain string/int
-    identifiers, which are already hashable -- are passed through unchanged.
-    This lets callers that mix hand-coded and branch_extended_AD-derived Hash
-    entries use path_key (and paths_equal/unique_paths/paths_any_in/paths_all_in,
-    all built on it) uniformly without needing to know which kind of Hash
-    entry they have.
-    """
-    if not isinstance(path, list):
-        return path
-    return tuple((node.name, node.choices[0]) for node in path)
-
-
-def paths_equal(path1, path2):
-    """Value equality for two individual paths (or other Hash entries), independent of identity/hashing."""
-    if not isinstance(path1, list) or not isinstance(path2, list):
-        return path1 == path2
-    if len(path1) != len(path2):
-        return False
-    for node1, node2 in zip(path1, path2):
-        if node1.name != node2.name:
-            return False
-        if len(node1.choices) != 1 or len(node2.choices) != 1:
-            return False
-        if node1.choices[0] != node2.choices[0]:
-            return False
-    return True
-
-
-def unique_paths(paths):
-    """Deduplicate an arbitrary iterable of individual paths, in O(n).
-
-    Keeps the first occurrence of each distinct path (by value, per
-    `paths_equal`) and drops later duplicates. Because paths are unhashable,
-    doing this by hand (`if p not in seen_list: seen_list.append(p)`) costs
-    O(n^2) equality comparisons; `unique_paths` costs O(n) by hashing each
-    path's `path_key` instead.
-    """
-    seen = set()
-    out = []
-    for p in paths:
-        key = path_key(p)
-        if key not in seen:
-            seen.add(key)
-            out.append(p)
-    return out
-
-
-def paths_any_in(needles, haystack):
-    """True if any path in `needles` also appears (by value) in `haystack`."""
-    haystack_keys = {path_key(p) for p in haystack}
-    return any(path_key(p) in haystack_keys for p in needles)
-
-
-def paths_all_in(needles, haystack):
-    """True if every path in `needles` also appears (by value) in `haystack`."""
-    haystack_keys = {path_key(p) for p in haystack}
-    return all(path_key(p) in haystack_keys for p in needles)
 
 
 class PathSet:
@@ -248,10 +177,6 @@ class PathSet:
             if item_node.choices[0] not in trace_node.choices:
                 return False
         return True
-
-    @staticmethod
-    def _paths_equal(path1, path2):
-        return paths_equal(path1, path2)
 
     def __bool__(self):
         return len(self) > 0
@@ -540,14 +465,12 @@ def _unwrap_sensitive(value):
     return value
 
 
-def _resolve_options(tol, atol, rtol, tol_mode, abs_policy):
+def _resolve_options(atol, rtol, tol_mode, abs_policy):
     if tol_mode not in {"local", "input_scaled"}:
         raise ValueError("tol_mode must be 'local' or 'input_scaled'")
-    if atol is not None and tol != 0.0:
-        raise ValueError("Specify either tol or atol, not both")
     if abs_policy not in {"zero", "enumerate"}:
         raise ValueError("abs_policy must be 'zero' or 'enumerate'")
-    return (tol if atol is None else atol), rtol, tol_mode, abs_policy
+    return atol, rtol, tol_mode, abs_policy
 
 
 @contextmanager
@@ -692,50 +615,50 @@ def _batch_popf(name):
     return entry[1:]
 
 
-class HashTensor:
+class _HashTensor:
     def __init__(self, value, sensitivity=None):
         if isinstance(value, _SensitivityTensor):
             sensitivity = value.sensitivity
             value = value.value
-        logger.debug("HashTensor.__init__: value=%s", value)
+        logger.debug("_HashTensor.__init__: value=%s", value)
         self.value = value
         self.sensitivity = sensitivity
 
     def __repr__(self):
-        return f'HashTensor({self.value})'
+        return f'_HashTensor({self.value})'
 
     def __str__(self):
-        return f'HashTensor({self.value})'
+        return f'_HashTensor({self.value})'
 
     @staticmethod
     def _unwrap(other):
-        if isinstance(other, HashTensor):
+        if isinstance(other, _HashTensor):
             return other.value
         return other
 
     def __add__(self, other):
-        return HashTensor(self.value + self._unwrap(other))
+        return _HashTensor(self.value + self._unwrap(other))
 
     def __radd__(self, other):
-        return HashTensor(self._unwrap(other) + self.value)
+        return _HashTensor(self._unwrap(other) + self.value)
 
     def __sub__(self, other):
-        return HashTensor(self.value - self._unwrap(other))
+        return _HashTensor(self.value - self._unwrap(other))
 
     def __rsub__(self, other):
-        return HashTensor(self._unwrap(other) - self.value)
+        return _HashTensor(self._unwrap(other) - self.value)
 
     def __mul__(self, other):
-        return HashTensor(self.value * self._unwrap(other))
+        return _HashTensor(self.value * self._unwrap(other))
 
     def __rmul__(self, other):
-        return HashTensor(self._unwrap(other) * self.value)
+        return _HashTensor(self._unwrap(other) * self.value)
 
     def __truediv__(self, other):
-        return HashTensor(self.value / self._unwrap(other))
+        return _HashTensor(self.value / self._unwrap(other))
 
     def __rtruediv__(self, other):
-        return HashTensor(self._unwrap(other) / self.value)
+        return _HashTensor(self._unwrap(other) / self.value)
 
 
 def max(inval):
@@ -774,7 +697,7 @@ def max(inval):
             sensitivity = jnp.max(flat_sensitivity[:, jnp.array(nearby_locs)], axis=1)
         else:
             sensitivity = inval.sensitivity.reshape((inval.sensitivity.shape[0], -1))[:, loc]
-    return HashTensor(val, sensitivity)
+    return _HashTensor(val, sensitivity)
 
 
 def min(inval):
@@ -813,7 +736,7 @@ def min(inval):
             sensitivity = jnp.max(flat_sensitivity[:, jnp.array(nearby_locs)], axis=1)
         else:
             sensitivity = inval.sensitivity.reshape((inval.sensitivity.shape[0], -1))[:, loc]
-    return HashTensor(val, sensitivity)
+    return _HashTensor(val, sensitivity)
 
 
 def _elementwise_minmax(one, two, name, jnp_op, prefer_first):
@@ -849,13 +772,13 @@ def _elementwise_minmax(one, two, name, jnp_op, prefer_first):
         bits = (selector >> jnp.arange(len(nearby_indices))) & 1
         flip = jnp.zeros(m, dtype=bool).at[nearby_arr].set(bits.astype(bool))
         pick_two = _reshape_pick_two(jnp.logical_xor(base_arr, flip), one.value, two.value)
-        result = HashTensor(jnp.where(pick_two, two.value, one.value))
+        result = _HashTensor(jnp.where(pick_two, two.value, one.value))
         logger.debug("%s: vmap replaying - pick_two=%s, result=%s", name, pick_two, result.value)
         return result
     elif _is_batch_replay.get():
         (pick_two,) = _batch_popf(name)
         pick_two = _reshape_pick_two(pick_two, one.value, two.value)
-        result = HashTensor(jnp.where(pick_two, two.value, one.value))
+        result = _HashTensor(jnp.where(pick_two, two.value, one.value))
         logger.debug("%s: batch replaying - pick_two=%s, result=%s", name, pick_two, result.value)
         return result
     else:
@@ -865,7 +788,7 @@ def _elementwise_minmax(one, two, name, jnp_op, prefer_first):
             one.value,
             two.value,
         )
-        result = HashTensor(jnp.where(pick_two, two.value, one.value))
+        result = _HashTensor(jnp.where(pick_two, two.value, one.value))
         logger.debug("%s: replaying - pick_two=%s, result=%s", name, pick_two, result.value)
         return result
     value = jnp_op(one.value, two.value)
@@ -888,7 +811,7 @@ def _elementwise_minmax(one, two, name, jnp_op, prefer_first):
             jnp.maximum(one_sensitivity, two_sensitivity),
             selected,
         )
-    return HashTensor(value, sensitivity)
+    return _HashTensor(value, sensitivity)
 
 
 def _resolve_pick_two(nearby_indices, choice_int, base_pick_two):
@@ -918,7 +841,7 @@ def sum(inval):
     if inval.sensitivity is not None:
         axes = tuple(range(1, inval.sensitivity.ndim))
         sensitivity = jnp.sum(inval.sensitivity, axis=axes)
-    result = HashTensor(jnp.sum(inval.value), sensitivity)
+    result = _HashTensor(jnp.sum(inval.value), sensitivity)
     logger.debug("sum: result=%s", result.value)
     return result
 
@@ -968,7 +891,7 @@ def abs(inval):
             value = _abs_from_branch(inval.value, nearby_indices, 0, base_negate)
         else:
             value = _abs_from_choice(inval.value, nearby_indices, base_negate)
-        result = HashTensor(value, inval.sensitivity)
+        result = _HashTensor(value, inval.sensitivity)
         logger.debug("abs: recording - result=%s", result.value)
         return result
     elif _is_vmap_replay.get():
@@ -976,33 +899,33 @@ def abs(inval):
         choice = node.choices[0]
         if len(choice) == 3:
             nearby_indices, _, base_negate = choice
-            result = HashTensor(_abs_from_branch(inval.value, nearby_indices, selector, base_negate))
+            result = _HashTensor(_abs_from_branch(inval.value, nearby_indices, selector, base_negate))
         else:
             nearby_indices, base_negate = choice
-            result = HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate))
+            result = _HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate))
         logger.debug("abs: vmap replaying - result=%s", result.value)
         return result
     elif _is_batch_replay.get():
         ambiguous, negate = _batch_popf("abs")
         ambiguous = jnp.reshape(ambiguous, jnp.shape(inval.value))
         negate = jnp.reshape(negate, jnp.shape(inval.value))
-        result = HashTensor(_abs_from_masks(inval.value, ambiguous, negate))
+        result = _HashTensor(_abs_from_masks(inval.value, ambiguous, negate))
         logger.debug("abs: batch replaying - result=%s", result.value)
         return result
     else:
         choice = _trace_popf("abs")
         if len(choice) == 3:
             nearby_indices, choice_int, base_negate = choice
-            result = HashTensor(_abs_from_branch(inval.value, nearby_indices, choice_int, base_negate))
+            result = _HashTensor(_abs_from_branch(inval.value, nearby_indices, choice_int, base_negate))
         else:
             nearby_indices, base_negate = choice
-            result = HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate))
+            result = _HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate))
         logger.debug("abs: replaying - result=%s", result.value)
         return result
 
 
-def record(fun, tol=0.0, *, atol=None, rtol=0.0, tol_mode="local", abs_policy="zero"):
-    atol, rtol, tol_mode, abs_policy = _resolve_options(tol, atol, rtol, tol_mode, abs_policy)
+def record(fun, *, atol=0.0, rtol=0.0, tol_mode="local", abs_policy="zero"):
+    atol, rtol, tol_mode, abs_policy = _resolve_options(atol, rtol, tol_mode, abs_policy)
 
     def recorded(*args, **kwargs):
         with _branch_mode("record", atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy) as trace:
@@ -1026,9 +949,9 @@ def replay(fun, path):
     return replayed
 
 
-def grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local", abs_policy="zero"):
+def grad(fun, argnums=0, has_aux=False, *, atol=0.0, rtol=0.0, tol_mode="local", abs_policy="zero"):
     def grad_fn(*args, **kwargs):
-        _, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(*args, **kwargs)
+        _, paths = record(fun, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(*args, **kwargs)
         default_path = paths[0]
 
         with _branch_mode("replay", replay_path=default_path):
@@ -1043,9 +966,9 @@ def grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mod
     return grad_fn
 
 
-def value_and_grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local", abs_policy="zero"):
+def value_and_grad(fun, argnums=0, has_aux=False, *, atol=0.0, rtol=0.0, tol_mode="local", abs_policy="zero"):
     def val_grad_fn(*args, **kwargs):
-        record_result, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(*args, **kwargs)
+        record_result, paths = record(fun, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(*args, **kwargs)
         default_path = paths[0]
 
         if has_aux:
@@ -1059,7 +982,7 @@ def value_and_grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.
 
         if has_aux:
             grads, aux = grad_result
-            return (record_value, grads, aux), paths
+            return ((record_value, aux), grads), paths
         else:
             return (record_value, grad_result), paths
     return val_grad_fn
@@ -1088,7 +1011,7 @@ def replay_value_and_grad(fun, path, argnums=0, has_aux=False, _jax_vg_fn=None):
 
         if has_aux:
             (value, aux), grads = vg_result
-            return value, grads, aux
+            return (value, aux), grads
         else:
             value, grads = vg_result
             return value, grads
@@ -1187,7 +1110,7 @@ def _get_jit_batched_vg(fun, leaf_layout, n_args, argnums, has_aux):
             return fun(*call_args)
 
     jax_vg_fn = jax.value_and_grad(vmap_body, argnums=argnums, has_aux=has_aux)
-    # NB: this module defines its own `sum` (for HashTensor values, see below), which
+    # NB: this module defines its own `sum` (for _HashTensor values, see below), which
     # shadows the builtin -- use a plain loop instead of sum(...) here.
     total_leaves = 0
     for _, n_leaves in leaf_layout:
@@ -1259,16 +1182,16 @@ def replay_value_and_grad_batch(fun, paths, argnums=0, has_aux=False):
 
         if has_aux:
             (values, aux), grads = vg_out
-            return values, grads, aux
+            return (values, aux), grads
         else:
             values, grads = vg_out
             return values, grads
     return batched_val_grad
 
 
-def all_value_and_grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local", abs_policy="zero"):
+def all_value_and_grad(fun, argnums=0, has_aux=False, *, atol=0.0, rtol=0.0, tol_mode="local", abs_policy="zero"):
     def all_vg_fn(*args, **kwargs):
-        _defaultresult, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(*args, **kwargs)
+        _defaultresult, paths = record(fun, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(*args, **kwargs)
 
         if kwargs or not paths.trace:
             jax_vg_fn = jax.value_and_grad(fun, argnums=argnums, has_aux=has_aux)
@@ -1299,7 +1222,7 @@ def all_value_and_grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rto
             (values, aux), grads = vg_out
             for k in range(n_paths):
                 aux_k = jax.tree_util.tree_map(lambda a, k=k: a[k], aux)
-                results.append((values[k], grads[k], aux_k))
+                results.append(((values[k], aux_k), grads[k]))
         else:
             values, grads = vg_out
             for k in range(n_paths):

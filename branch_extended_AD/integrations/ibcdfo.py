@@ -5,7 +5,7 @@ import numpy as np
 from ..HashTensor import record, replay_value_and_grad_batch
 
 
-def h_fun(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0,
+def h_fun(fun, argnums=0, has_aux=False, *, atol=0.0, rtol=0.0,
           tol_mode="local", abs_policy="zero"):
     def wrapped(z, H0=None):
         z_jax = jnp.asarray(z)
@@ -13,7 +13,6 @@ def h_fun(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0,
         if H0 is None:
             defaultresult, paths = record(
                 fun,
-                tol=tol,
                 atol=atol,
                 rtol=rtol,
                 tol_mode=tol_mode,
@@ -31,24 +30,32 @@ def h_fun(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0,
                 return defaultresult, gradients, paths
 
             full_paths = list(paths)
-            _, gradient = replay_value_and_grad_batch(
+            batch_result = replay_value_and_grad_batch(
                 fun,
                 full_paths,
                 argnums=argnums,
                 has_aux=has_aux,
             )(z_jax)
+            if has_aux:
+                (_, _aux), gradient = batch_result
+            else:
+                _, gradient = batch_result
             gradients = np.asarray(gradient, dtype=float).T
             return defaultresult, gradients, paths
 
         if len(H0) == 0:
             return np.zeros(0, dtype=float), np.zeros((z_jax.shape[0], 0), dtype=float)
 
-        values, gradient = replay_value_and_grad_batch(
+        batch_result = replay_value_and_grad_batch(
             fun,
             H0,
             argnums=argnums,
             has_aux=has_aux,
         )(z_jax)
+        if has_aux:
+            (values, _aux), gradient = batch_result
+        else:
+            values, gradient = batch_result
         return np.asarray(values, dtype=float), np.asarray(gradient, dtype=float).T
 
     return wrapped

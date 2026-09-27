@@ -6,7 +6,7 @@ from .HashTensor import (
     _is_vmap_replay,
     _is_batch_replay,
     _replay_path,
-    HashTensor,
+    _HashTensor,
     max as _ht_max,
     min as _ht_min,
     maximum as _ht_maximum,
@@ -26,7 +26,7 @@ def _is_active():
 
 
 def _unwrap(val):
-    if isinstance(val, HashTensor):
+    if isinstance(val, _HashTensor):
         if val.sensitivity is not None:
             from .HashTensor import _SensitivityTensor
             return _SensitivityTensor(val.value, val.sensitivity)
@@ -46,37 +46,37 @@ def _reject_active_kwargs(name, kwargs):
 def max(a, **kwargs):
     if _is_active():
         _reject_active_kwargs("max", kwargs)
-        return _unwrap(_ht_max(HashTensor(a)))
+        return _unwrap(_ht_max(_HashTensor(a)))
     return _jnp.max(a, **kwargs)
 
 
 def min(a, **kwargs):
     if _is_active():
         _reject_active_kwargs("min", kwargs)
-        return _unwrap(_ht_min(HashTensor(a)))
+        return _unwrap(_ht_min(_HashTensor(a)))
     return _jnp.min(a, **kwargs)
 
 
 def maximum(x1, x2):
     if _is_active():
-        return _unwrap(_ht_maximum(HashTensor(x1), HashTensor(x2)))
+        return _unwrap(_ht_maximum(_HashTensor(x1), _HashTensor(x2)))
     return _jnp.maximum(x1, x2)
 
 
 def minimum(x1, x2):
     if _is_active():
-        return _unwrap(_ht_minimum(HashTensor(x1), HashTensor(x2)))
+        return _unwrap(_ht_minimum(_HashTensor(x1), _HashTensor(x2)))
     return _jnp.minimum(x1, x2)
 
 
 def sum(a, **kwargs):
     if _is_active():
         _reject_active_kwargs("sum", kwargs)
-        return _unwrap(_ht_sum(HashTensor(a)))
+        return _unwrap(_ht_sum(_HashTensor(a)))
     return _jnp.sum(a, **kwargs)
 
 
 def abs(a):
     if _is_active():
-        return _unwrap(_ht_abs(HashTensor(a)))
+        return _unwrap(_ht_abs(_HashTensor(a)))
     return _jnp.abs(a)
