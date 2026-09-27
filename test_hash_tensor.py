@@ -9,6 +9,7 @@ import pytest
 
 import branch_extended_AD as jnph
 import branch_extended_AD.numpy as jnph_np
+from branch_extended_AD.integrations.ibcdfo import h_fun
 
 # branch_extended_AD/__init__.py does `from .HashTensor import HashTensor` (the class), which
 # shadows the `branch_extended_AD.HashTensor` submodule attribute on the package -- import via
@@ -946,7 +947,7 @@ def test_h_fun_batch_replay_matches_loop():
     def f(x):
         return jnph_np.sum(jnph_np.abs(x)) + jnph_np.max(x)
 
-    hfun = jnph.h_fun(f, tol=0.01)
+    hfun = h_fun(f, tol=0.01)
     z = np.array([1.0, -0.5, 0.005, 2.0, -0.005])
 
     defaultresult, grads0, paths = hfun(z)
@@ -971,7 +972,7 @@ def test_h_fun_record_branch_matches_manual():
     def f(x):
         return jnph_np.max(x)
 
-    hfun = jnph.h_fun(f, tol=0.1)
+    hfun = h_fun(f, tol=0.1)
     z = np.array([1.0, 1.05, 0.5])
 
     defaultresult, grads, paths = hfun(z)
@@ -993,7 +994,7 @@ def test_h_fun_record_branch_cache_correctness_across_different_ties():
     def f(x):
         return jnph_np.max(x)
 
-    hfun = jnph.h_fun(f, tol=0.0)
+    hfun = h_fun(f, tol=0.0)
 
     z1 = np.array([1.0, 1.0, 1.0, 0.0])  # 3-way tie -> npaths=3
     _, grads1, paths1 = hfun(z1)

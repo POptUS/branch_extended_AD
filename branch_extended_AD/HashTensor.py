@@ -1202,7 +1202,7 @@ def _get_jit_batched_vg(fun, leaf_layout, n_args, argnums, has_aux):
 def replay_value_and_grad_batch(fun, paths, argnums=0, has_aux=False):
     """Batch replay+grad of `fun` over J independently-obtained, fully-resolved paths.
 
-    This is the batching mechanism for h_fun's H0-given branch: H0 is a Python list of
+    This is the batching mechanism used by the IBCDFO integration: H0 is a Python list of
     length J of already-resolved paths (e.g. accumulated by choose_generator_set from
     several distinct nearby points), not a PathSet to enumerate. It vmaps a single
     jax.value_and_grad(fun) call over all J paths at once, instead of dispatching J
@@ -1307,43 +1307,3 @@ def all_value_and_grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rto
 
         return results, paths
     return all_vg_fn
-
-
-def h_fun(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local", abs_policy="zero"):
-
-    def wrapped(z, H0=None):
-        z_jax = jnp.asarray(z)
-
-        if H0 is None:
-            defaultresult, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(z_jax)
-
-            if not paths.trace:
-                # No traced max/min/abs/maximum/minimum ops at all -- a single default
-                # path, nothing to batch (jax.vmap needs at least one non-None in_axes
-                # entry, so this can't go through replay_value_and_grad_batch below).
-                jax_vg_fn = jax.value_and_grad(fun, argnums=argnums, has_aux=has_aux)
-                vg_result = jax_vg_fn(z_jax)
-                if has_aux:
-                    (v, _aux), g = vg_result
-                else:
-                    v, g = vg_result
-                grads = np.asarray(g, dtype=float).reshape(z_jax.shape[0], 1)
-                return defaultresult, grads, paths
-
-            full_paths = list(paths)
-            v, g = replay_value_and_grad_batch(fun, full_paths, argnums=argnums, has_aux=has_aux)(z_jax)
-            grads = np.asarray(g, dtype=float).T
-
-            return defaultresult, grads, paths
-        else:
-            J = len(H0)
-            if J == 0:
-                return np.zeros(0, dtype=float), np.zeros((z_jax.shape[0], 0), dtype=float)
-
-            v, g = replay_value_and_grad_batch(fun, H0, argnums=argnums, has_aux=has_aux)(z_jax)
-            h = np.asarray(v, dtype=float)
-            grads = np.asarray(g, dtype=float).T
-
-            return h, grads
-
-    return wrapped
