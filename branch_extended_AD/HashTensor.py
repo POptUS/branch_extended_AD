@@ -16,6 +16,7 @@ _replay_pos: ContextVar[int] = ContextVar('_replay_pos', default=0)
 _atol: ContextVar[float] = ContextVar('_atol', default=0)
 _rtol: ContextVar[float] = ContextVar('_rtol', default=0)
 _tol_mode: ContextVar[str] = ContextVar('_tol_mode', default='local')
+_abs_policy: ContextVar[str] = ContextVar('_abs_policy', default='zero')
 _is_vmap_replay: ContextVar[bool] = ContextVar('_is_vmap_replay', default=False)
 _vmap_trace: ContextVar[list] = ContextVar('_vmap_trace', default=None)
 _vmap_selectors: ContextVar[tuple] = ContextVar('_vmap_selectors', default=None)
@@ -539,16 +540,18 @@ def _unwrap_sensitive(value):
     return value
 
 
-def _resolve_tolerance(tol, atol, rtol, tol_mode):
+def _resolve_options(tol, atol, rtol, tol_mode, abs_policy):
     if tol_mode not in {"local", "input_scaled"}:
         raise ValueError("tol_mode must be 'local' or 'input_scaled'")
     if atol is not None and tol != 0.0:
         raise ValueError("Specify either tol or atol, not both")
-    return (tol if atol is None else atol), rtol, tol_mode
+    if abs_policy not in {"zero", "enumerate"}:
+        raise ValueError("abs_policy must be 'zero' or 'enumerate'")
+    return (tol if atol is None else atol), rtol, tol_mode, abs_policy
 
 
 @contextmanager
-def _branch_mode(mode, atol=0, rtol=0, tol_mode="local", replay_path=None, trace=None, selectors=None, batch_arrays=None):
+def _branch_mode(mode, atol=0, rtol=0, tol_mode="local", abs_policy="zero", replay_path=None, trace=None, selectors=None, batch_arrays=None):
     logger.debug("Entering _branch_mode: mode=%s, atol=%s, rtol=%s, tol_mode=%s", mode, atol, rtol, tol_mode)
 
     rec_token = _is_recording.set(False)
@@ -558,6 +561,7 @@ def _branch_mode(mode, atol=0, rtol=0, tol_mode="local", replay_path=None, trace
     atol_token = _atol.set(0)
     rtol_token = _rtol.set(0)
     tol_mode_token = _tol_mode.set("local")
+    abs_policy_token = _abs_policy.set("zero")
     vmap_flag_token = _is_vmap_replay.set(False)
     vmap_trace_token = _vmap_trace.set(None)
     vmap_sel_token = _vmap_selectors.set(None)
@@ -570,6 +574,7 @@ def _branch_mode(mode, atol=0, rtol=0, tol_mode="local", replay_path=None, trace
             _atol.set(atol)
             _rtol.set(rtol)
             _tol_mode.set(tol_mode)
+            _abs_policy.set(abs_policy)
             logger.debug("Starting recording mode")
 
             trace = _recorded_trace.get()
@@ -628,6 +633,7 @@ def _branch_mode(mode, atol=0, rtol=0, tol_mode="local", replay_path=None, trace
         _atol.reset(atol_token)
         _rtol.reset(rtol_token)
         _tol_mode.reset(tol_mode_token)
+        _abs_policy.reset(abs_policy_token)
         _is_vmap_replay.reset(vmap_flag_token)
         _vmap_trace.reset(vmap_trace_token)
         _vmap_selectors.reset(vmap_sel_token)
@@ -933,6 +939,15 @@ def _abs_from_choice(value, nearby_indices, base_negate):
     return _abs_from_masks(value, ambiguous.reshape(shape), negate.reshape(shape))
 
 
+def _abs_from_branch(value, nearby_indices, choice_int, base_negate):
+    negate = jnp.asarray(base_negate, dtype=bool)
+    if nearby_indices:
+        nearby = jnp.asarray(nearby_indices, dtype=jnp.int32)
+        flips = ((choice_int >> jnp.arange(len(nearby_indices))) & 1).astype(bool)
+        negate = negate.at[nearby].set(jnp.logical_xor(negate[nearby], flips))
+    return jnp.where(negate.reshape(jnp.shape(value)), -value, value)
+
+
 def abs(inval):
     logger.debug("abs: input=%s", inval.value)
     if _is_recording.get():
@@ -941,34 +956,56 @@ def abs(inval):
         nearby_indices = tuple(int(x) for x in nearby_indices.tolist())
         logger.debug("abs: recording - nearby_indices=%s", nearby_indices)
         base_negate = tuple(bool(x) for x in jnp.ravel(inval.value < 0).tolist())
-        choices = [(nearby_indices, base_negate)]
+        if _abs_policy.get() == "enumerate":
+            choices = [
+                (nearby_indices, choice_int, base_negate)
+                for choice_int in range(2 ** len(nearby_indices))
+            ]
+        else:
+            choices = [(nearby_indices, base_negate)]
         _trace_append("abs", choices)
-        result = HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate), inval.sensitivity)
+        if _abs_policy.get() == "enumerate":
+            value = _abs_from_branch(inval.value, nearby_indices, 0, base_negate)
+        else:
+            value = _abs_from_choice(inval.value, nearby_indices, base_negate)
+        result = HashTensor(value, inval.sensitivity)
         logger.debug("abs: recording - result=%s", result.value)
         return result
     elif _is_vmap_replay.get():
-        node, _selector = _trace_popf_vmap("abs")
-        nearby_indices, base_negate = node.choices[0]
-        result = HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate))
+        node, selector = _trace_popf_vmap("abs")
+        choice = node.choices[0]
+        if len(choice) == 3:
+            nearby_indices, _, base_negate = choice
+            result = HashTensor(_abs_from_branch(inval.value, nearby_indices, selector, base_negate))
+        else:
+            nearby_indices, base_negate = choice
+            result = HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate))
         logger.debug("abs: vmap replaying - result=%s", result.value)
         return result
     elif _is_batch_replay.get():
         ambiguous, negate = _batch_popf("abs")
+        ambiguous = jnp.reshape(ambiguous, jnp.shape(inval.value))
+        negate = jnp.reshape(negate, jnp.shape(inval.value))
         result = HashTensor(_abs_from_masks(inval.value, ambiguous, negate))
         logger.debug("abs: batch replaying - result=%s", result.value)
         return result
     else:
-        nearby_indices, base_negate = _trace_popf("abs")
-        result = HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate))
+        choice = _trace_popf("abs")
+        if len(choice) == 3:
+            nearby_indices, choice_int, base_negate = choice
+            result = HashTensor(_abs_from_branch(inval.value, nearby_indices, choice_int, base_negate))
+        else:
+            nearby_indices, base_negate = choice
+            result = HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate))
         logger.debug("abs: replaying - result=%s", result.value)
         return result
 
 
-def record(fun, tol=0.0, *, atol=None, rtol=0.0, tol_mode="local"):
-    atol, rtol, tol_mode = _resolve_tolerance(tol, atol, rtol, tol_mode)
+def record(fun, tol=0.0, *, atol=None, rtol=0.0, tol_mode="local", abs_policy="zero"):
+    atol, rtol, tol_mode, abs_policy = _resolve_options(tol, atol, rtol, tol_mode, abs_policy)
 
     def recorded(*args, **kwargs):
-        with _branch_mode("record", atol=atol, rtol=rtol, tol_mode=tol_mode) as trace:
+        with _branch_mode("record", atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy) as trace:
             if tol_mode == "input_scaled":
                 directions = _input_size(args) + _input_size(kwargs)
                 wrapped_args, position = _wrap_sensitive_inputs(args, directions, 0)
@@ -989,9 +1026,9 @@ def replay(fun, path):
     return replayed
 
 
-def grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local"):
+def grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local", abs_policy="zero"):
     def grad_fn(*args, **kwargs):
-        _, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode)(*args, **kwargs)
+        _, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(*args, **kwargs)
         default_path = paths[0]
 
         with _branch_mode("replay", replay_path=default_path):
@@ -1006,9 +1043,9 @@ def grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mod
     return grad_fn
 
 
-def value_and_grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local"):
+def value_and_grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local", abs_policy="zero"):
     def val_grad_fn(*args, **kwargs):
-        record_result, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode)(*args, **kwargs)
+        record_result, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(*args, **kwargs)
         default_path = paths[0]
 
         if has_aux:
@@ -1076,13 +1113,22 @@ def _build_batch_leaves(paths, names):
             flat_leaves.append(loc_arr)
             leaf_layout.append((name, 1))
         elif name == "abs":
-            p = len(choices[0][1])
+            enumerated = len(choices[0]) == 3
+            p = len(choices[0][2] if enumerated else choices[0][1])
             negate = np.zeros((J, p), dtype=bool)
             ambiguous = np.zeros((J, p), dtype=bool)
-            for k, (nearby_indices, base_negate) in enumerate(choices):
-                negate[k] = np.asarray(base_negate, dtype=bool)
-                if len(nearby_indices) > 0:
-                    ambiguous[k, np.array(nearby_indices, dtype=np.intp)] = True
+            for k, choice in enumerate(choices):
+                if enumerated:
+                    nearby_indices, choice_int, base_negate = choice
+                    negate[k] = np.asarray(base_negate, dtype=bool)
+                    for bit, index in enumerate(nearby_indices):
+                        if (choice_int >> bit) & 1:
+                            negate[k, index] = not negate[k, index]
+                else:
+                    nearby_indices, base_negate = choice
+                    negate[k] = np.asarray(base_negate, dtype=bool)
+                    if len(nearby_indices) > 0:
+                        ambiguous[k, np.array(nearby_indices, dtype=np.intp)] = True
             flat_leaves.append(jnp.asarray(ambiguous))
             flat_leaves.append(jnp.asarray(negate))
             leaf_layout.append((name, 2))
@@ -1220,9 +1266,9 @@ def replay_value_and_grad_batch(fun, paths, argnums=0, has_aux=False):
     return batched_val_grad
 
 
-def all_value_and_grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local"):
+def all_value_and_grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local", abs_policy="zero"):
     def all_vg_fn(*args, **kwargs):
-        _defaultresult, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode)(*args, **kwargs)
+        _defaultresult, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(*args, **kwargs)
 
         if kwargs or not paths.trace:
             jax_vg_fn = jax.value_and_grad(fun, argnums=argnums, has_aux=has_aux)
@@ -1263,13 +1309,13 @@ def all_value_and_grad(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rto
     return all_vg_fn
 
 
-def h_fun(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local"):
+def h_fun(fun, argnums=0, tol=0.0, has_aux=False, *, atol=None, rtol=0.0, tol_mode="local", abs_policy="zero"):
 
     def wrapped(z, H0=None):
         z_jax = jnp.asarray(z)
 
         if H0 is None:
-            defaultresult, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode)(z_jax)
+            defaultresult, paths = record(fun, tol=tol, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(z_jax)
 
             if not paths.trace:
                 # No traced max/min/abs/maximum/minimum ops at all -- a single default

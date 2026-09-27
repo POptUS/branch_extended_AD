@@ -158,6 +158,37 @@ def test_abs_ambiguous_gradient_is_zero():
     assert jnp.allclose(g, jnp.array([0.0, -1.0, 1.0]))
 
 
+def test_abs_ambiguity_policy_can_enumerate_limiting_gradients():
+    def f(x):
+        return jnph_np.sum(jnph_np.abs(x))
+
+    x = jnp.zeros((2, 2))
+    results, paths = jnph.all_value_and_grad(f, abs_policy="enumerate")(x)
+    assert len(paths) == 16
+    gradients = {tuple(np.asarray(gradient).ravel()) for _, gradient in results}
+    assert gradients == set(product((-1.0, 1.0), repeat=x.size))
+    assert all(value == 0.0 for value, _ in results)
+
+    batch_values, batch_gradients = jnph.replay_value_and_grad_batch(f, list(paths))(x)
+    assert batch_values.shape == (16,)
+    assert batch_gradients.shape == (16, 2, 2)
+    assert {tuple(np.asarray(gradient).ravel()) for gradient in batch_gradients} == gradients
+
+
+def test_abs_ambiguity_policy_defaults_to_zero_gradient():
+    def f(x):
+        return jnph_np.sum(jnph_np.abs(x))
+
+    gradient, paths = jnph.grad(f)(jnp.zeros(2))
+    assert len(paths) == 1
+    assert jnp.allclose(gradient, jnp.zeros(2))
+
+
+def test_invalid_abs_ambiguity_policy():
+    with pytest.raises(ValueError, match="abs_policy"):
+        jnph.record(lambda x: x, abs_policy="invalid")
+
+
 def test_multidimensional_primitives_record_replay_and_gradients():
     x = jnp.array([[1.0, 3.0], [3.0, -2.0]])
 
