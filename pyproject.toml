@@ -29,3 +29,7 @@ Repository = "https://github.com/POptUS/branch_extended_AD"
 
 [tool.setuptools.packages.find]
 include = ["branch_extended_AD*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

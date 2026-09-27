@@ -2,7 +2,6 @@ import importlib
 import time
 from itertools import product
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
