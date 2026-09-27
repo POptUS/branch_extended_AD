@@ -7,20 +7,24 @@ from ..paths import path_key
 
 
 def hash_key(value):
+    """Return a key for either a BEAD path or a manual IBCDFO hash."""
     return path_key(value) if isinstance(value, list) else value
 
 
 def hashes_any_in(needles, haystack):
+    """Return whether any requested IBCDFO hash occurs in a collection."""
     haystack_keys = {hash_key(value) for value in haystack}
     return any(hash_key(value) in haystack_keys for value in needles)
 
 
 def hashes_all_in(needles, haystack):
+    """Return whether every requested IBCDFO hash occurs in a collection."""
     haystack_keys = {hash_key(value) for value in haystack}
     return all(hash_key(value) in haystack_keys for value in needles)
 
 
 def unique_hashes(values):
+    """Remove duplicate IBCDFO hashes while keeping their original order."""
     result = []
     seen = set()
     for value in values:
@@ -33,6 +37,12 @@ def unique_hashes(values):
 
 def h_fun(fun, argnums=0, has_aux=False, *, atol=0.0, rtol=0.0,
           tol_mode="local", abs_policy="zero"):
+    """Adapt a JAX function to the h-function interface used by IBCDFO.
+
+    Calling the result without ``H0`` returns a value, gradient matrix, and
+    active paths. Calling it with ``H0`` returns values and gradients for those
+    paths.
+    """
     def wrapped(z, H0=None):
         z_jax = jnp.asarray(z)
 

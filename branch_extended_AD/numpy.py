@@ -27,36 +27,42 @@ def _unwrap(val):
 
 
 def max(a):
+    """Return the maximum and record nearby choices when BEAD is active."""
     if _is_active():
         return _unwrap(_ht_max(_HashTensor(a)))
     return _jnp.max(a)
 
 
 def min(a):
+    """Return the minimum and record nearby choices when BEAD is active."""
     if _is_active():
         return _unwrap(_ht_min(_HashTensor(a)))
     return _jnp.min(a)
 
 
 def maximum(x1, x2):
+    """Return elementwise maxima and record nearby choices when active."""
     if _is_active():
         return _unwrap(_ht_maximum(_HashTensor(x1), _HashTensor(x2)))
     return _jnp.maximum(x1, x2)
 
 
 def minimum(x1, x2):
+    """Return elementwise minima and record nearby choices when active."""
     if _is_active():
         return _unwrap(_ht_minimum(_HashTensor(x1), _HashTensor(x2)))
     return _jnp.minimum(x1, x2)
 
 
 def sum(a):
+    """Return the sum while preserving BEAD sensitivity data."""
     if _is_active():
         return _unwrap(_ht_sum(_HashTensor(a)))
     return _jnp.sum(a)
 
 
 def abs(a):
+    """Return absolute values using the active BEAD branch policy."""
     if _is_active():
         return _unwrap(_ht_abs(_HashTensor(a)))
     return _jnp.abs(a)

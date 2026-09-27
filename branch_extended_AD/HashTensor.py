@@ -75,6 +75,8 @@ class _AbsChoice:
 
 
 class PathSet:
+    """A collection of branch paths found while recording a function."""
+
     def __init__(self, *, trace=None, paths=None):
         if (trace is None) == (paths is None):
             raise ValueError("provide exactly one of trace or paths")
@@ -83,10 +85,12 @@ class PathSet:
 
     @classmethod
     def from_trace(cls, trace):
+        """Create a path set from recorded branch decisions."""
         return cls(trace=trace)
 
     @classmethod
     def from_paths(cls, paths):
+        """Create a path set from resolved paths."""
         paths = tuple(paths)
         if not all(isinstance(path, list) for path in paths):
             raise TypeError("paths must contain resolved path lists")
@@ -94,15 +98,18 @@ class PathSet:
 
     @classmethod
     def empty(cls):
+        """Create a path set with no paths."""
         return cls(paths=())
 
     @property
     def has_decisions(self):
+        """Return whether any path contains a branch decision."""
         if self._trace is not None:
             return bool(self._trace)
         return any(key for key in self._paths)
 
     def choices(self, decision_index):
+        """Return the possible choices for one branch decision."""
         if self._trace is not None:
             return tuple(self._trace[decision_index].choices)
         return tuple(dict.fromkeys(key[decision_index][1] for key in self._paths))
@@ -180,23 +187,27 @@ class PathSet:
         return f"PathSet with {len(self)} possible paths from {len(self._trace)} decisions"
 
     def union(self, other):
+        """Return paths that occur in either set."""
         if not isinstance(other, PathSet):
             raise TypeError("union requires another PathSet")
         return PathSet.from_paths([*self, *other])
 
     def intersection(self, other):
+        """Return paths that occur in both sets."""
         if not isinstance(other, PathSet):
             raise TypeError("intersection requires another PathSet")
         other_keys = {path_key(path) for path in other}
         return PathSet.from_paths(path for path in self if path_key(path) in other_keys)
 
     def difference(self, other):
+        """Return paths that occur in this set but not the other set."""
         if not isinstance(other, PathSet):
             raise TypeError("difference requires another PathSet")
         other_keys = {path_key(path) for path in other}
         return PathSet.from_paths(path for path in self if path_key(path) not in other_keys)
 
     def format_path(self, path):
+        """Return a readable description of a resolved path."""
         if not isinstance(path, list):
             raise TypeError("path must be a list of resolved trace nodes")
         if not path:
@@ -799,6 +810,18 @@ def abs(inval):
 
 
 def record(fun, *, atol=0.0, rtol=0.0, tol_mode="local", abs_policy="zero"):
+    """Wrap a function to return its value and nearby branch paths.
+
+    Args:
+        fun: Function to evaluate.
+        atol: Absolute distance used to find nearby choices.
+        rtol: Relative distance used to find nearby choices.
+        tol_mode: ``"local"`` or ``"input_scaled"``.
+        abs_policy: ``"zero"`` or ``"enumerate"``.
+
+    Returns:
+        A function that returns ``(value, paths)``.
+    """
     atol, rtol, tol_mode, abs_policy = _resolve_options(atol, rtol, tol_mode, abs_policy)
 
     def recorded(*args, **kwargs):
@@ -816,6 +839,10 @@ def record(fun, *, atol=0.0, rtol=0.0, tol_mode="local", abs_policy="zero"):
 
 
 def replay(fun, path):
+    """Wrap a function so it follows one recorded branch path.
+
+    The returned function has the same arguments and return value as ``fun``.
+    """
     def replayed(*args, **kwargs):
         with _branch_mode("replay", replay_path=path):
             value = fun(*args, **kwargs)
@@ -824,6 +851,10 @@ def replay(fun, path):
 
 
 def grad(fun, argnums=0, has_aux=False, *, atol=0.0, rtol=0.0, tol_mode="local", abs_policy="zero"):
+    """Wrap a function to return its default gradient and recorded paths.
+
+    ``argnums`` and ``has_aux`` have the same meaning as in ``jax.grad``.
+    """
     def grad_fn(*args, **kwargs):
         _, paths = record(fun, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(*args, **kwargs)
         default_path = paths[0]
@@ -841,6 +872,11 @@ def grad(fun, argnums=0, has_aux=False, *, atol=0.0, rtol=0.0, tol_mode="local",
 
 
 def value_and_grad(fun, argnums=0, has_aux=False, *, atol=0.0, rtol=0.0, tol_mode="local", abs_policy="zero"):
+    """Wrap a function to return its default value, gradient, and paths.
+
+    ``argnums`` and ``has_aux`` have the same meaning as in
+    ``jax.value_and_grad``.
+    """
     def val_grad_fn(*args, **kwargs):
         record_result, paths = record(fun, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(*args, **kwargs)
         default_path = paths[0]
@@ -863,6 +899,10 @@ def value_and_grad(fun, argnums=0, has_aux=False, *, atol=0.0, rtol=0.0, tol_mod
 
 
 def replay_grad(fun, path, argnums=0, has_aux=False):
+    """Wrap a function to return its gradient along one path.
+
+    ``argnums`` and ``has_aux`` have the same meaning as in ``jax.grad``.
+    """
     def replayed_grad(*args, **kwargs):
         with _branch_mode("replay", replay_path=path):
             jax_grad_fn = jax.grad(fun, argnums=argnums, has_aux=has_aux)
@@ -892,6 +932,11 @@ def _replay_value_and_grad(fun, path, jax_vg_fn, has_aux):
 
 
 def replay_value_and_grad(fun, path, argnums=0, has_aux=False):
+    """Wrap a function to return its value and gradient along one path.
+
+    ``argnums`` and ``has_aux`` have the same meaning as in
+    ``jax.value_and_grad``.
+    """
     return _replay_value_and_grad(
         fun,
         path,
@@ -901,13 +946,7 @@ def replay_value_and_grad(fun, path, argnums=0, has_aux=False):
 
 
 def _build_batch_leaves(paths, names):
-    """Convert J already-resolved paths' choices into dense, vmap-able arrays.
-
-    Unlike all_value_and_grad's selector arrays (which index into a PathSet's
-    Cartesian-product enumeration), this only ever reads path[i].choices[0] for each
-    of the J given paths -- there is no enumeration here, so this cannot blow up
-    combinatorially regardless of how many ties a record-time trace had.
-    """
+    """Convert resolved path choices into arrays for batched replay."""
     J = len(paths)
     flat_leaves = []
     leaf_layout = []
@@ -948,9 +987,7 @@ def _build_batch_leaves(paths, names):
 
 
 def _bucket_size(J):
-    """Round J up to the next power of two so the jitted vmap_body only ever sees
-    O(log2(J_max)) distinct batch shapes across a run, instead of a fresh XLA compile
-    for every J value encountered (J varies a lot call-to-call in practice)."""
+    """Round a batch size up to the next power of two."""
     if J <= 1:
         return 1
     return 1 << (J - 1).bit_length()
@@ -997,10 +1034,7 @@ def _build_jit_batched_vg(fun, leaf_layout, n_args, argnums, has_aux):
             return fun(*call_args)
 
     jax_vg_fn = jax.value_and_grad(vmap_body, argnums=argnums, has_aux=has_aux)
-    # This module defines its own sum, so use a loop for Python integers.
-    total_leaves = 0
-    for _, n_leaves in leaf_layout:
-        total_leaves += n_leaves
+    total_leaves = builtins.sum(n_leaves for _, n_leaves in leaf_layout)
     in_axes = (None,) * n_args + (0,) * total_leaves
     vmap_vg_fn = jax.vmap(jax_vg_fn, in_axes=in_axes)
     return key, jax.jit(vmap_vg_fn)
@@ -1024,21 +1058,11 @@ def _execute_batched_vg(fun, leaf_layout, argnums, has_aux, args, leaves, batch_
 
 
 def replay_value_and_grad_batch(fun, paths, argnums=0, has_aux=False):
-    """Batch replay+grad of `fun` over J independently-obtained, fully-resolved paths.
+    """Wrap a function to replay values and gradients for several paths at once.
 
-    This is the batching mechanism used by the IBCDFO integration: H0 is a Python list of
-    length J of already-resolved paths (e.g. accumulated by choose_generator_set from
-    several distinct nearby points), not a PathSet to enumerate. It vmaps a single
-    jax.value_and_grad(fun) call over all J paths at once, instead of dispatching J
-    separate unbatched jax calls (~11.5ms of dispatch overhead each). Because it only
-    ever reads each path's already-narrowed choices[0] and never constructs a PathSet
-    or calls _iter_positions, its cost is O(J) by construction -- it cannot reintroduce
-    the combinatorial explosion that vmapping over a PathSet's full enumeration caused
-    for the one-norm (abs-heavy) hfun.
-
-    The vmap(value_and_grad(...)) callable itself is jit-compiled and cached across
-    calls (see _get_jit_batched_vg) -- without that, every call pays full un-jitted JAX
-    dispatch overhead for every op regardless of batching.
+    ``paths`` must contain resolved paths with the same branch operations.
+    ``argnums`` and ``has_aux`` have the same meaning as in
+    ``jax.value_and_grad``.
     """
     paths, names = _validate_batch_paths(paths)
     J = len(paths)
@@ -1106,6 +1130,11 @@ def _evaluate_factorized_paths(fun, paths, args, argnums, has_aux):
 
 
 def all_value_and_grad(fun, argnums=0, has_aux=False, *, atol=0.0, rtol=0.0, tol_mode="local", abs_policy="zero"):
+    """Wrap a function to return values and gradients for every recorded path.
+
+    The returned function returns ``(results, paths)``. Each result uses the
+    same value-and-gradient structure as JAX.
+    """
     def all_vg_fn(*args, **kwargs):
         _defaultresult, paths = record(fun, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(*args, **kwargs)
 
