@@ -137,12 +137,17 @@ def paths_all_in(needles, haystack):
 
 
 class PathSet:
-    def __init__(self, trace, _empty=False):
+    def __init__(self, trace, _empty=False, _explicit_paths=None):
         self.trace = trace.copy()
         self._empty = _empty
+        self._explicit_paths = None if _explicit_paths is None else tuple(_explicit_paths)
         logger.debug("PathSet.__init__: trace with %s nodes", len(trace))
 
     def __iter__(self):
+        if self._explicit_paths is not None:
+            for path in self._explicit_paths:
+                yield self._tuple_to_path(path)
+            return
         if self._empty:
             return
         if not self.trace:
@@ -167,6 +172,8 @@ class PathSet:
         return False
 
     def _iter_positions(self):
+        if self._explicit_paths is not None:
+            raise ValueError("Explicit PathSet does not have factorized trace positions")
         if self._empty:
             return
         if not self.trace:
@@ -182,6 +189,8 @@ class PathSet:
             yield tuple(node.pos for node in self.trace)
 
     def __len__(self):
+        if self._explicit_paths is not None:
+            return len(self._explicit_paths)
         if self._empty:
             return 0
         total = 1
@@ -199,6 +208,9 @@ class PathSet:
 
         if index < 0 or index >= total_len:
             raise IndexError(f"Index {index} is out of range for PathSet with {total_len} elements")
+
+        if self._explicit_paths is not None:
+            return self._tuple_to_path(self._explicit_paths[index])
 
         if not self.trace:
             return []
@@ -221,6 +233,8 @@ class PathSet:
             nodes = item
         else:
             return False
+        if self._explicit_paths is not None:
+            return path_key(nodes) in set(self._explicit_paths)
         if len(nodes) != len(self.trace):
             return False
         if not nodes and not self.trace:
@@ -242,13 +256,21 @@ class PathSet:
         return len(self) > 0
 
     def __repr__(self):
+        if self._explicit_paths is not None:
+            return f'PathSet(explicit_paths={len(self._explicit_paths)})'
         return f'PathSet(trace_length={len(self.trace)}, total_paths={len(self)})'
 
     def __str__(self):
+        if self._explicit_paths is not None:
+            return f'PathSet with {len(self)} explicit paths'
         return f'PathSet with {len(self)} possible paths from {len(self.trace)} trace nodes'
 
     def _path_to_tuple(self, path):
         return path_key(path)
+
+    @staticmethod
+    def _tuple_to_path(path_tuple):
+        return [_TraceNode(name, [choice]) for name, choice in path_tuple]
 
     def _create_trace_from_paths(self, path_tuples):
         if not path_tuples:
@@ -269,10 +291,8 @@ class PathSet:
         return trace
 
     def _build_from_tuples(self, path_tuples):
-        trace = self._create_trace_from_paths(path_tuples)
-        if trace is None:
-            return PathSet([], _empty=True)
-        return PathSet(trace)
+        unique = tuple(dict.fromkeys(path_tuples))
+        return PathSet([], _empty=not unique, _explicit_paths=unique)
 
     def union(self, other):
         if not isinstance(other, PathSet):

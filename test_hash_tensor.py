@@ -220,6 +220,28 @@ def test_path_set_operations():
     print("All set operations tests passed!")
 
 
+def test_path_set_operations_preserve_correlated_paths():
+    def path(a, b):
+        return [
+            ht._TraceNode("a", [a]),
+            ht._TraceNode("b", [b]),
+        ]
+
+    first = jnph.PathSet([], _explicit_paths=[jnph.path_key(path(0, 0))])
+    second = jnph.PathSet([], _explicit_paths=[jnph.path_key(path(1, 1))])
+
+    union = first.union(second)
+    assert {jnph.path_key(item) for item in union} == {
+        jnph.path_key(path(0, 0)),
+        jnph.path_key(path(1, 1)),
+    }
+    assert len(union) == 2
+    assert len(first.intersection(second)) == 0
+    assert {jnph.path_key(item) for item in union.difference(first)} == {
+        jnph.path_key(path(1, 1)),
+    }
+
+
 def test_path_set_with_no_tolerance():
     print("Testing PathSet with no tolerance effects...")
 
