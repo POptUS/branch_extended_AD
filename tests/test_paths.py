@@ -51,7 +51,7 @@ def test_factorized_path_set_iteration_indexing_and_membership():
 
 
 def test_path_set_iterators_are_independent():
-    paths = bead.PathSet([
+    paths = bead.PathSet.from_trace([
         ht._TraceNode("a", [0, 1]),
         ht._TraceNode("b", ["x", "y"]),
     ])
@@ -69,13 +69,11 @@ def test_path_set_iterators_are_independent():
 
 
 def test_path_set_algebra_preserves_correlations():
-    diagonal = bead.PathSet([], _explicit_paths=[
-        path_key(make_path(("a", 0), ("b", 0))),
-        path_key(make_path(("a", 1), ("b", 1))),
+    diagonal = bead.PathSet.from_paths([
+        make_path(("a", 0), ("b", 0)),
+        make_path(("a", 1), ("b", 1)),
     ])
-    first = bead.PathSet([], _explicit_paths=[
-        path_key(make_path(("a", 0), ("b", 0))),
-    ])
+    first = bead.PathSet.from_paths([make_path(("a", 0), ("b", 0))])
 
     assert {path_key(path) for path in diagonal.union(first)} == {
         (("a", 0), ("b", 0)),
@@ -96,8 +94,8 @@ def test_path_set_algebra_preserves_correlations():
 
 
 def test_empty_and_single_path_sets():
-    empty = bead.PathSet([], _empty=True)
-    singleton = bead.PathSet([])
+    empty = bead.PathSet.empty()
+    singleton = bead.PathSet.from_trace([])
 
     assert len(empty) == 0
     assert not empty
@@ -107,17 +105,17 @@ def test_empty_and_single_path_sets():
     assert list(singleton) == [[]]
     assert singleton[0] == []
     assert [] in singleton
-    assert "total_paths=0" in repr(empty)
+    assert repr(empty) == "PathSet(paths=0)"
     assert "possible paths" in str(singleton)
 
 
 def test_explicit_path_set_string_representation():
-    paths = bead.PathSet([], _explicit_paths=[(("max", 0),)])
-    assert repr(paths) == "PathSet(explicit_paths=1)"
+    paths = bead.PathSet.from_paths([make_path(("max", 0))])
+    assert repr(paths) == "PathSet(paths=1)"
     assert str(paths) == "PathSet with 1 explicit paths"
 
 
-def test_path_helpers_support_paths_and_plain_hashes():
+def test_path_helpers_support_paths():
     first = make_path(("a", 0), ("b", 1))
     duplicate = make_path(("a", 0), ("b", 1))
     other = make_path(("a", 1), ("b", 1))
@@ -130,9 +128,10 @@ def test_path_helpers_support_paths_and_plain_hashes():
     assert paths_all_in([first, duplicate], [first])
     assert not paths_all_in([first, other], [first])
 
-    assert path_key("manual") == "manual"
-    assert paths_equal("manual", "manual")
-    assert unique_paths(["a", "a", "b"]) == ["a", "b"]
+    with pytest.raises(TypeError):
+        path_key("manual")
+    with pytest.raises(TypeError):
+        paths_equal("manual", "manual")
 
 
 def test_format_path_describes_branch_choices():
@@ -142,7 +141,8 @@ def test_format_path_describes_branch_choices():
     assert "standard choice" in text
 
     max_path = make_path(("max", 2))
-    assert "scalar choice = 2" in bead.PathSet([]).format_path(max_path)
-    assert bead.PathSet([]).format_path([]) == "No decision points"
+    formatter = bead.PathSet.from_trace([])
+    assert "scalar choice = 2" in formatter.format_path(max_path)
+    assert formatter.format_path([]) == "No decision points"
     with pytest.raises(TypeError):
-        bead.PathSet([]).format_path("invalid")
+        formatter.format_path("invalid")

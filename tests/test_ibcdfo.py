@@ -1,9 +1,19 @@
+import importlib
+
 import jax.numpy as jnp
 import numpy as np
 
 import branch_extended_AD as bead
 import branch_extended_AD.numpy as bnp
-from branch_extended_AD.integrations.ibcdfo import h_fun
+from branch_extended_AD.integrations.ibcdfo import (
+    h_fun,
+    hash_key,
+    hashes_all_in,
+    hashes_any_in,
+    unique_hashes,
+)
+
+ht = importlib.import_module("branch_extended_AD.HashTensor")
 
 def test_h_fun_batch_replay_matches_loop():
     def f(x):
@@ -115,3 +125,19 @@ def test_h_fun_without_branch_primitives_returns_one_gradient_column():
     assert gradients.shape == (2, 1)
     assert np.allclose(gradients[:, 0], np.array([2.0, 4.0]))
     assert len(paths) == 1
+
+
+def test_ibcdfo_hash_helpers_support_paths_and_manual_hashes():
+    path = [ht._TraceNode("max", [0])]
+    duplicate = [ht._TraceNode("max", [0])]
+    other = [ht._TraceNode("max", [1])]
+
+    assert hash_key(path) == (("max", 0),)
+    assert hash_key("manual") == "manual"
+    assert hashes_any_in([path], [duplicate, "manual"])
+    assert hashes_all_in([path, "manual"], [duplicate, "manual"])
+    assert unique_hashes([path, duplicate, "manual", "manual", other]) == [
+        path,
+        "manual",
+        other,
+    ]

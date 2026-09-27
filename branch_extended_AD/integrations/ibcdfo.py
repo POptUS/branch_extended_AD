@@ -3,6 +3,32 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..HashTensor import record, replay_value_and_grad_batch
+from ..paths import path_key
+
+
+def hash_key(value):
+    return path_key(value) if isinstance(value, list) else value
+
+
+def hashes_any_in(needles, haystack):
+    haystack_keys = {hash_key(value) for value in haystack}
+    return any(hash_key(value) in haystack_keys for value in needles)
+
+
+def hashes_all_in(needles, haystack):
+    haystack_keys = {hash_key(value) for value in haystack}
+    return all(hash_key(value) in haystack_keys for value in needles)
+
+
+def unique_hashes(values):
+    result = []
+    seen = set()
+    for value in values:
+        key = hash_key(value)
+        if key not in seen:
+            seen.add(key)
+            result.append(value)
+    return result
 
 
 def h_fun(fun, argnums=0, has_aux=False, *, atol=0.0, rtol=0.0,
@@ -21,7 +47,7 @@ def h_fun(fun, argnums=0, has_aux=False, *, atol=0.0, rtol=0.0,
             if has_aux:
                 defaultresult, _ = defaultresult
 
-            if not paths.trace:
+            if not paths.has_decisions:
                 jax_vg_fn = jax.value_and_grad(fun, argnums=argnums, has_aux=has_aux)
                 vg_result = jax_vg_fn(z_jax)
                 if has_aux:

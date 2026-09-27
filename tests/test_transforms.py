@@ -127,13 +127,13 @@ def test_replay_value_and_grad():
         assert g.shape == x.shape
 
 
-def test_replay_accepts_singleton_path_set():
+def test_replay_accepts_path():
     def function(x):
         return bnp.max(x)
 
     x = jnp.array([1.0, 2.0])
     value, paths = bead.record(function)(x)
-    assert bead.replay(function, paths)(x) == value
+    assert bead.replay(function, paths[0])(x) == value
 
 
 def test_replay_rejects_ambiguous_or_invalid_paths():
@@ -142,9 +142,9 @@ def test_replay_rejects_ambiguous_or_invalid_paths():
 
     x = jnp.array([1.0, 1.0])
     _, paths = bead.record(function)(x)
-    with pytest.raises(ValueError, match="multiple paths"):
+    with pytest.raises(TypeError, match="resolved path list"):
         bead.replay(function, paths)(x)
-    with pytest.raises(TypeError, match="Unexpected replay_path type"):
+    with pytest.raises(TypeError, match="resolved path list"):
         bead.replay(function, "invalid")(x)
     with pytest.raises(ValueError, match="Path exhausted"):
         bead.replay(function, [])(x)

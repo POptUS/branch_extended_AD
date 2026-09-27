@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .paths import path_key, paths_equal
+from .paths import path_key
 
 logger = logging.getLogger(__name__)
 
@@ -55,216 +55,149 @@ class _TraceNode:
         return self.name == other.name and self.choices == other.choices
 
 class PathSet:
-    def __init__(self, trace, _empty=False, _explicit_paths=None):
-        self.trace = trace.copy()
-        self._empty = _empty
-        self._explicit_paths = None if _explicit_paths is None else tuple(_explicit_paths)
-        logger.debug("PathSet.__init__: trace with %s nodes", len(trace))
+    def __init__(self, *, trace=None, paths=None):
+        if (trace is None) == (paths is None):
+            raise ValueError("provide exactly one of trace or paths")
+        self._trace = None if trace is None else tuple(trace)
+        self._paths = None if paths is None else tuple(dict.fromkeys(path_key(path) for path in paths))
+
+    @classmethod
+    def from_trace(cls, trace):
+        return cls(trace=trace)
+
+    @classmethod
+    def from_paths(cls, paths):
+        paths = tuple(paths)
+        if not all(isinstance(path, list) for path in paths):
+            raise TypeError("paths must contain resolved path lists")
+        return cls(paths=paths)
+
+    @classmethod
+    def empty(cls):
+        return cls(paths=())
+
+    @property
+    def has_decisions(self):
+        if self._trace is not None:
+            return bool(self._trace)
+        return any(key for key in self._paths)
+
+    def choices(self, decision_index):
+        if self._trace is not None:
+            return tuple(self._trace[decision_index].choices)
+        return tuple(dict.fromkeys(key[decision_index][1] for key in self._paths))
 
     def __iter__(self):
-        if self._explicit_paths is not None:
-            for path in self._explicit_paths:
-                yield self._tuple_to_path(path)
+        if self._paths is not None:
+            yield from ([_TraceNode(name, [choice]) for name, choice in key] for key in self._paths)
             return
-        if self._empty:
-            return
-        if not self.trace:
+        if not self._trace:
             yield []
             return
-
-        for choices in itertools.product(*(node.choices for node in self.trace)):
-            yield [_TraceNode(node.name, [choice]) for node, choice in zip(self.trace, choices)]
+        for choices in itertools.product(*(node.choices for node in self._trace)):
+            yield [_TraceNode(node.name, [choice]) for node, choice in zip(self._trace, choices)]
 
     def _iter_positions(self):
-        if self._explicit_paths is not None:
-            raise ValueError("Explicit PathSet does not have factorized trace positions")
-        if self._empty:
-            return
-        if not self.trace:
+        if self._paths is not None:
+            raise ValueError("explicit PathSet does not have factorized trace positions")
+        if not self._trace:
             yield ()
             return
-
-        yield from itertools.product(*(range(node.num) for node in self.trace))
+        yield from itertools.product(*(range(node.num) for node in self._trace))
 
     def __len__(self):
-        if self._explicit_paths is not None:
-            return len(self._explicit_paths)
-        if self._empty:
-            return 0
+        if self._paths is not None:
+            return len(self._paths)
         total = 1
-        for node in self.trace:
+        for node in self._trace:
             total *= node.num
         return total
 
     def __getitem__(self, index):
         if not isinstance(index, int):
-            raise TypeError("Index must be an integer")
-
-        total_len = len(self)
+            raise TypeError("index must be an integer")
         if index < 0:
-            index = total_len + index
-
-        if index < 0 or index >= total_len:
-            raise IndexError(f"Index {index} is out of range for PathSet with {total_len} elements")
-
-        if self._explicit_paths is not None:
-            return self._tuple_to_path(self._explicit_paths[index])
-
-        if not self.trace:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(f"index {index} is out of range for PathSet with {len(self)} elements")
+        if self._paths is not None:
+            return [_TraceNode(name, [choice]) for name, choice in self._paths[index]]
+        if not self._trace:
             return []
-
-        remaining_index = index
         positions = []
-        for i, node in enumerate(self.trace):
+        remaining = index
+        for current, node in enumerate(self._trace):
             combinations_after = 1
-            for later_node in self.trace[i + 1:]:
-                combinations_after *= later_node.num
-            positions.append(remaining_index // combinations_after)
-            remaining_index = remaining_index % combinations_after
+            for later in self._trace[current + 1:]:
+                combinations_after *= later.num
+            positions.append(remaining // combinations_after)
+            remaining %= combinations_after
+        return [_TraceNode(node.name, [node.choices[position]]) for node, position in zip(self._trace, positions)]
 
-        return [
-            _TraceNode(node.name, [node.choices[position]])
-            for node, position in zip(self.trace, positions)
-        ]
-
-    def __contains__(self, item):
-        if isinstance(item, list):
-            nodes = item
-        else:
+    def __contains__(self, path):
+        if not isinstance(path, list):
             return False
-        if self._explicit_paths is not None:
-            return path_key(nodes) in set(self._explicit_paths)
-        if len(nodes) != len(self.trace):
+        if self._paths is not None:
+            return path_key(path) in self._paths
+        if len(path) != len(self._trace):
             return False
-        if not nodes and not self.trace:
-            return True
-        for item_node, trace_node in zip(nodes, self.trace):
-            if item_node.name != trace_node.name:
-                return False
-            if len(item_node.choices) != 1:
-                return False
-            if item_node.choices[0] not in trace_node.choices:
-                return False
-        return True
+        return all(
+            decision.name == node.name and len(decision.choices) == 1 and decision.choices[0] in node.choices
+            for decision, node in zip(path, self._trace)
+        )
 
     def __bool__(self):
         return len(self) > 0
 
     def __repr__(self):
-        if self._explicit_paths is not None:
-            return f'PathSet(explicit_paths={len(self._explicit_paths)})'
-        return f'PathSet(trace_length={len(self.trace)}, total_paths={len(self)})'
+        if self._paths is not None:
+            return f"PathSet(paths={len(self._paths)})"
+        return f"PathSet(decisions={len(self._trace)}, paths={len(self)})"
 
     def __str__(self):
-        if self._explicit_paths is not None:
-            return f'PathSet with {len(self)} explicit paths'
-        return f'PathSet with {len(self)} possible paths from {len(self.trace)} trace nodes'
-
-    def _path_to_tuple(self, path):
-        return path_key(path)
-
-    @staticmethod
-    def _tuple_to_path(path_tuple):
-        return [_TraceNode(name, [choice]) for name, choice in path_tuple]
-
-    def _create_trace_from_paths(self, path_tuples):
-        if not path_tuples:
-            return None
-
-        node_choices = {}
-        for path_tuple in path_tuples:
-            for i, (node_name, choice) in enumerate(path_tuple):
-                if i not in node_choices:
-                    node_choices[i] = {'name': node_name, 'choices': []}
-                if choice not in node_choices[i]['choices']:
-                    node_choices[i]['choices'].append(choice)
-
-        trace = []
-        for i in sorted(node_choices.keys()):
-            node_info = node_choices[i]
-            trace.append(_TraceNode(node_info['name'], node_info['choices']))
-        return trace
-
-    def _build_from_tuples(self, path_tuples):
-        unique = tuple(dict.fromkeys(path_tuples))
-        return PathSet([], _empty=not unique, _explicit_paths=unique)
+        if self._paths is not None:
+            return f"PathSet with {len(self)} explicit paths"
+        return f"PathSet with {len(self)} possible paths from {len(self._trace)} decisions"
 
     def union(self, other):
         if not isinstance(other, PathSet):
-            raise TypeError("Union requires another PathSet")
-        all_paths = set()
-        for path in self:
-            all_paths.add(self._path_to_tuple(path))
-        for path in other:
-            all_paths.add(self._path_to_tuple(path))
-        return self._build_from_tuples(list(all_paths))
+            raise TypeError("union requires another PathSet")
+        return PathSet.from_paths([*self, *other])
 
     def intersection(self, other):
         if not isinstance(other, PathSet):
-            raise TypeError("Intersection requires another PathSet")
-        other_paths = set()
-        for path in other:
-            other_paths.add(self._path_to_tuple(path))
-        common_paths = []
-        for path in self:
-            pt = self._path_to_tuple(path)
-            if pt in other_paths:
-                common_paths.append(pt)
-        return self._build_from_tuples(common_paths)
+            raise TypeError("intersection requires another PathSet")
+        other_keys = {path_key(path) for path in other}
+        return PathSet.from_paths(path for path in self if path_key(path) in other_keys)
 
     def difference(self, other):
         if not isinstance(other, PathSet):
-            raise TypeError("Difference requires another PathSet")
-        other_paths = set()
-        for path in other:
-            other_paths.add(self._path_to_tuple(path))
-        diff_paths = []
-        for path in self:
-            pt = self._path_to_tuple(path)
-            if pt not in other_paths:
-                diff_paths.append(pt)
-        return self._build_from_tuples(diff_paths)
+            raise TypeError("difference requires another PathSet")
+        other_keys = {path_key(path) for path in other}
+        return PathSet.from_paths(path for path in self if path_key(path) not in other_keys)
 
     def format_path(self, path):
         if not isinstance(path, list):
             raise TypeError("path must be a list of resolved trace nodes")
-        nodes = path
-        if not nodes:
+        if not path:
             return "No decision points"
-
         lines = []
-        for step, node in enumerate(nodes):
-            choice_val = node.choices[0]
-            if isinstance(choice_val, tuple) and len(choice_val) == 2 and isinstance(choice_val[0], tuple) and isinstance(choice_val[1], tuple):
-                nearby_indices, _base_negate = choice_val
-                if len(nearby_indices) == 0:
-                    lines.append(f"  Step {step+1} ({node.name}): standard absolute value (no ambiguous indices)")
-                else:
-                    lines.append(f"  Step {step+1} ({node.name}): ambiguous (zero-grad) indices {list(nearby_indices)}")
-            elif isinstance(choice_val, tuple) and len(choice_val) >= 2 and isinstance(choice_val[0], tuple):
-                nearby_indices, choice_int = choice_val[0], choice_val[1]
-                if isinstance(nearby_indices, tuple):
-                    if len(nearby_indices) == 0:
-                        lines.append(f"  Step {step+1} ({node.name}): standard choice (no nearby values)")
-                    else:
-                        flipped_indices = [
-                            nearby_indices[j] for j in range(len(nearby_indices))
-                            if (choice_int >> j) & 1
-                        ]
-                        if len(flipped_indices) == 0:
-                            lines.append(f"  Step {step+1} ({node.name}): standard choice (no flips)")
-                        else:
-                            lines.append(f"  Step {step+1} ({node.name}): flip indices {flipped_indices} (from nearby {list(nearby_indices)})")
-                else:
-                    lines.append(f"  Step {step+1} ({node.name}): indices {nearby_indices}, pattern {choice_int:b}")
-            elif isinstance(choice_val, tuple):
-                true_indices = [j for j, val in enumerate(choice_val) if val]
-                if len(true_indices) == 0:
-                    lines.append(f"  Step {step+1} ({node.name}): standard absolute value")
-                else:
-                    lines.append(f"  Step {step+1} ({node.name}): negate at indices {true_indices}")
+        for step, decision in enumerate(path, start=1):
+            choice = decision.choices[0]
+            prefix = f"  Step {step} ({decision.name}): "
+            if isinstance(choice, tuple) and len(choice) == 2 and all(isinstance(item, tuple) for item in choice):
+                nearby_indices, _ = choice
+                description = "standard absolute value" if not nearby_indices else f"ambiguous indices {list(nearby_indices)}"
+            elif isinstance(choice, tuple) and len(choice) >= 2 and isinstance(choice[0], tuple):
+                nearby_indices, choice_int = choice[:2]
+                flipped = [index for bit, index in enumerate(nearby_indices) if (choice_int >> bit) & 1]
+                description = "standard choice" if not flipped else f"flip indices {flipped}"
+            elif isinstance(choice, tuple):
+                indices = [index for index, selected in enumerate(choice) if selected]
+                description = "standard absolute value" if not indices else f"negate at indices {indices}"
             else:
-                lines.append(f"  Step {step+1} ({node.name}): scalar choice = {choice_val}")
+                description = f"scalar choice = {choice}"
+            lines.append(prefix + description)
         return "\n".join(lines)
 
 
@@ -464,12 +397,8 @@ def _branch_mode(mode, atol=0, rtol=0, tol_mode="local", abs_policy="zero", repl
             raise ValueError("replay_path must be provided in replay mode")
         if isinstance(replay_path, list):
             path = tuple(replay_path)
-        elif isinstance(replay_path, PathSet) and len(replay_path) == 1:
-            path = tuple(next(iter(replay_path)))
-        elif isinstance(replay_path, PathSet):
-            raise ValueError("PathSet with multiple paths cannot be used directly as replay_path. Iterate over it first.")
         else:
-            raise TypeError(f"Unexpected replay_path type: {type(replay_path)}")
+            raise TypeError("replay_path must be a resolved path list")
         state = replace(state, replay_path=path)
     elif mode == "vmap_replay":
         if trace is None or selectors is None:
@@ -858,7 +787,7 @@ def record(fun, *, atol=0.0, rtol=0.0, tol_mode="local", abs_policy="zero"):
                 value = _unwrap_sensitive(fun(*wrapped_args, **wrapped_kwargs))
             else:
                 value = fun(*args, **kwargs)
-        paths = PathSet(trace)
+        paths = PathSet.from_trace(trace)
         return value, paths
     return recorded
 
@@ -924,8 +853,7 @@ def replay_grad(fun, path, argnums=0, has_aux=False):
     return replayed_grad
 
 
-def replay_value_and_grad(fun, path, argnums=0, has_aux=False, _jax_vg_fn=None):
-    jax_vg_fn = _jax_vg_fn if _jax_vg_fn is not None else jax.value_and_grad(fun, argnums=argnums, has_aux=has_aux)
+def _replay_value_and_grad(fun, path, jax_vg_fn, has_aux):
 
     def replayed_val_grad(*args, **kwargs):
         with _branch_mode("replay", replay_path=path):
@@ -938,6 +866,15 @@ def replay_value_and_grad(fun, path, argnums=0, has_aux=False, _jax_vg_fn=None):
             value, grads = vg_result
             return value, grads
     return replayed_val_grad
+
+
+def replay_value_and_grad(fun, path, argnums=0, has_aux=False):
+    return _replay_value_and_grad(
+        fun,
+        path,
+        jax.value_and_grad(fun, argnums=argnums, has_aux=has_aux),
+        has_aux,
+    )
 
 
 def _build_batch_leaves(paths, names):
@@ -1062,24 +999,23 @@ def replay_value_and_grad_batch(fun, paths, argnums=0, has_aux=False):
     """
     paths = list(paths)
     J = len(paths)
+    if J == 0:
+        raise ValueError("replay_value_and_grad_batch requires at least one path")
+    if not all(isinstance(path, list) for path in paths):
+        raise TypeError("paths must contain resolved path lists")
+    names = [node.name for node in paths[0]]
+    if any([node.name for node in path] != names for path in paths[1:]):
+        raise ValueError(
+            "replay_value_and_grad_batch requires all paths to share the same "
+            "op-name sequence (same traced control flow)."
+        )
+    encoded_leaves, leaf_layout = _build_batch_leaves(paths, names)
 
     def batched_val_grad(*args, **kwargs):
         if kwargs:
             raise TypeError("replay_value_and_grad_batch does not support kwargs")
         n_args = len(args)
-
-        if J == 0:
-            raise ValueError("replay_value_and_grad_batch requires at least one path")
-
-        names = [node.name for node in paths[0]]
-        for path in paths[1:]:
-            if [node.name for node in path] != names:
-                raise ValueError(
-                    "replay_value_and_grad_batch requires all paths to share the same "
-                    "op-name sequence (same traced control flow)."
-                )
-
-        flat_leaves, leaf_layout = _build_batch_leaves(paths, names)
+        flat_leaves = encoded_leaves
 
         # Pad the batch axis up to a power-of-two bucket so the jitted vmap_body only
         # recompiles for a new bucket size, not for every distinct J -- see
@@ -1110,44 +1046,52 @@ def replay_value_and_grad_batch(fun, paths, argnums=0, has_aux=False):
     return batched_val_grad
 
 
+def _evaluate_paths_sequentially(fun, paths, args, kwargs, argnums, has_aux):
+    jax_vg_fn = jax.value_and_grad(fun, argnums=argnums, has_aux=has_aux)
+    return [
+        _replay_value_and_grad(fun, path, jax_vg_fn, has_aux)(*args, **kwargs)
+        for path in paths
+    ]
+
+
+def _evaluate_factorized_paths(fun, paths, args, argnums, has_aux):
+    trace = paths._trace
+    positions = list(paths._iter_positions())
+    selector_arrays = [
+        jnp.asarray([position[index] for position in positions], dtype=jnp.int32)
+        for index in range(len(trace))
+    ]
+
+    def vmap_body(*inner_args):
+        call_args = inner_args[:len(args)]
+        selectors = inner_args[len(args):]
+        with _branch_mode("vmap_replay", trace=trace, selectors=selectors):
+            return fun(*call_args)
+
+    jax_vg_fn = jax.value_and_grad(vmap_body, argnums=argnums, has_aux=has_aux)
+    vg_out = jax.vmap(jax_vg_fn, in_axes=(None,) * len(args) + (0,) * len(trace))(
+        *args,
+        *selector_arrays,
+    )
+    results = []
+    if has_aux:
+        (values, aux), grads = vg_out
+        for index in range(len(positions)):
+            item_aux = jax.tree_util.tree_map(lambda value: value[index], aux)
+            results.append(((values[index], item_aux), grads[index]))
+    else:
+        values, grads = vg_out
+        results.extend((values[index], grads[index]) for index in range(len(positions)))
+    return results
+
+
 def all_value_and_grad(fun, argnums=0, has_aux=False, *, atol=0.0, rtol=0.0, tol_mode="local", abs_policy="zero"):
     def all_vg_fn(*args, **kwargs):
         _defaultresult, paths = record(fun, atol=atol, rtol=rtol, tol_mode=tol_mode, abs_policy=abs_policy)(*args, **kwargs)
 
-        if kwargs or not paths.trace:
-            jax_vg_fn = jax.value_and_grad(fun, argnums=argnums, has_aux=has_aux)
-            results = []
-            for path in paths:
-                vg_fn = replay_value_and_grad(fun, path, argnums=argnums, has_aux=has_aux, _jax_vg_fn=jax_vg_fn)
-                results.append(vg_fn(*args, **kwargs))
-            return results, paths
-
-        n_args = len(args)
-        n_nodes = len(paths.trace)
-        positions = list(paths._iter_positions())
-        n_paths = len(positions)
-        selector_arrays = [jnp.asarray([pos[i] for pos in positions], dtype=jnp.int32) for i in range(n_nodes)]
-
-        def vmap_body(*inner_args):
-            call_args = inner_args[:n_args]
-            selectors = inner_args[n_args:]
-            with _branch_mode("vmap_replay", trace=paths.trace, selectors=selectors):
-                return fun(*call_args)
-
-        jax_vg_fn = jax.value_and_grad(vmap_body, argnums=argnums, has_aux=has_aux)
-        vmap_vg_fn = jax.vmap(jax_vg_fn, in_axes=(None,) * n_args + (0,) * n_nodes)
-        vg_out = vmap_vg_fn(*args, *selector_arrays)
-
-        results = []
-        if has_aux:
-            (values, aux), grads = vg_out
-            for k in range(n_paths):
-                aux_k = jax.tree_util.tree_map(lambda a, k=k: a[k], aux)
-                results.append(((values[k], aux_k), grads[k]))
+        if kwargs or not paths.has_decisions:
+            results = _evaluate_paths_sequentially(fun, paths, args, kwargs, argnums, has_aux)
         else:
-            values, grads = vg_out
-            for k in range(n_paths):
-                results.append((values[k], grads[k]))
-
+            results = _evaluate_factorized_paths(fun, paths, args, argnums, has_aux)
         return results, paths
     return all_vg_fn

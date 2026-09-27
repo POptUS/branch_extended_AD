@@ -1,21 +1,11 @@
 def path_key(path):
     if not isinstance(path, list):
-        return path
+        raise TypeError("path must be a list of resolved trace nodes")
     return tuple((node.name, node.choices[0]) for node in path)
 
 
 def paths_equal(path1, path2):
-    if not isinstance(path1, list) or not isinstance(path2, list):
-        return path1 == path2
-    if len(path1) != len(path2):
-        return False
-    return all(
-        node1.name == node2.name
-        and len(node1.choices) == 1
-        and len(node2.choices) == 1
-        and node1.choices[0] == node2.choices[0]
-        for node1, node2 in zip(path1, path2)
-    )
+    return path_key(path1) == path_key(path2)
 
 
 def unique_paths(paths):

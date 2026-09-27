@@ -28,16 +28,9 @@ def test_non_overridden_array_operations_match_jax():
 
 
 @pytest.mark.parametrize("operation", [bnp.max, bnp.min, bnp.sum])
-@pytest.mark.parametrize(
-    "transform",
-    [bead.record, bead.grad, bead.value_and_grad, bead.all_value_and_grad],
-)
-def test_reduction_kwargs_are_rejected_during_transform(operation, transform):
-    def function(x):
-        return operation(x, axis=0)
-
-    with pytest.raises(NotImplementedError, match="keyword arguments"):
-        transform(function)(jnp.ones((2, 2)))
+def test_reduction_signatures_are_deliberately_narrow(operation):
+    with pytest.raises(TypeError):
+        operation(jnp.ones((2, 2)), axis=0)
 
 
 def test_array_operations_compose_with_branch_primitives():

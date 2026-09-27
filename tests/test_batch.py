@@ -133,7 +133,7 @@ def test_replay_value_and_grad_batch_rejects_empty_paths_and_kwargs():
 
     x = jnp.array([1.0, 2.0])
     with pytest.raises(ValueError, match="at least one path"):
-        bead.replay_value_and_grad_batch(function, [])(x)
+        bead.replay_value_and_grad_batch(function, [])
 
     path = bead.record(function)(x)[1][0]
     with pytest.raises(TypeError, match="does not support kwargs"):

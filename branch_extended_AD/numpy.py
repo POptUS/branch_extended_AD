@@ -26,27 +26,16 @@ def _unwrap(val):
     return val
 
 
-def _reject_active_kwargs(name, kwargs):
-    if kwargs:
-        arguments = ", ".join(sorted(kwargs))
-        raise NotImplementedError(
-            f"branch_extended_AD.numpy.{name} does not support keyword arguments "
-            f"during record/replay: {arguments}"
-        )
-
-
-def max(a, **kwargs):
+def max(a):
     if _is_active():
-        _reject_active_kwargs("max", kwargs)
         return _unwrap(_ht_max(_HashTensor(a)))
-    return _jnp.max(a, **kwargs)
+    return _jnp.max(a)
 
 
-def min(a, **kwargs):
+def min(a):
     if _is_active():
-        _reject_active_kwargs("min", kwargs)
         return _unwrap(_ht_min(_HashTensor(a)))
-    return _jnp.min(a, **kwargs)
+    return _jnp.min(a)
 
 
 def maximum(x1, x2):
@@ -61,11 +50,10 @@ def minimum(x1, x2):
     return _jnp.minimum(x1, x2)
 
 
-def sum(a, **kwargs):
+def sum(a):
     if _is_active():
-        _reject_active_kwargs("sum", kwargs)
         return _unwrap(_ht_sum(_HashTensor(a)))
-    return _jnp.sum(a, **kwargs)
+    return _jnp.sum(a)
 
 
 def abs(a):
