@@ -109,6 +109,17 @@ def test_abs_ambiguity_policy_defaults_to_zero_gradient():
     assert jnp.allclose(gradient, jnp.zeros(2))
 
 
+def test_abs_zero_policy_preserves_value_and_stops_ambiguous_gradient():
+    def function(x):
+        return bnp.abs(x)
+
+    x = jnp.array(0.05)
+    (value, gradient), paths = bead.value_and_grad(function, atol=0.1)(x)
+    assert value == 0.05
+    assert gradient == 0.0
+    assert len(paths) == 1
+
+
 def test_invalid_abs_ambiguity_policy():
     with pytest.raises(ValueError, match="abs_policy"):
         bead.record(lambda x: x, abs_policy="invalid")

@@ -725,6 +725,7 @@ def sum(inval):
 
 def _abs_from_masks(value, ambiguous, negate):
     linear_part = jnp.where(negate, -value, value)
+    # abs_policy="zero" keeps |value| but assigns derivative zero at ambiguous entries.
     zero_grad_part = jax.lax.stop_gradient(jnp.abs(value))
     return jnp.where(ambiguous, zero_grad_part, linear_part)
 
