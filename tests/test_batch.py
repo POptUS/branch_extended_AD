@@ -1,9 +1,13 @@
+import importlib
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 import branch_extended_AD as bead
 import branch_extended_AD.numpy as bnp
+
+ht = importlib.import_module("branch_extended_AD.HashTensor")
 
 def test_replay_value_and_grad_batch_matches_loop_max_min():
     def f_max(x):
@@ -167,3 +171,33 @@ def test_replay_value_and_grad_batch_has_aux_matches_loop():
         assert jnp.allclose(values[index], manual_value)
         assert jnp.allclose(aux["double"][index], manual_aux["double"])
         assert jnp.allclose(gradients[index], manual_gradient)
+
+
+def test_batched_replay_reuses_jitted_wrapper(monkeypatch):
+    def function(x):
+        return bnp.max(x)
+
+    x = jnp.ones(4)
+    paths = list(bead.record(function)(x)[1])
+    ht._jit_batch_cache.clear()
+    jit_calls = 0
+    original_jit = ht.jax.jit
+
+    def counting_jit(*args, **kwargs):
+        nonlocal jit_calls
+        jit_calls += 1
+        return original_jit(*args, **kwargs)
+
+    monkeypatch.setattr(ht.jax, "jit", counting_jit)
+    bead.replay_value_and_grad_batch(function, paths[:3])(x)
+    cached = next(iter(ht._jit_batch_cache.values()))
+    bead.replay_value_and_grad_batch(function, paths)(x)
+
+    assert jit_calls == 1
+    assert next(iter(ht._jit_batch_cache.values())) is cached
+    assert hasattr(cached, "lower")
+
+    names = [node.name for node in paths[0]]
+    leaves, layout = ht._build_batch_leaves(paths, names)
+    padded, _ = ht._pad_batch_leaves(leaves, len(paths))
+    cached.lower(x, *padded).compile()

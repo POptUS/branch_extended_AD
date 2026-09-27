@@ -932,31 +932,35 @@ def _bucket_size(J):
     return 1 << (J - 1).bit_length()
 
 
-def _get_jit_batched_vg(fun, leaf_layout, n_args, argnums, has_aux):
-    """Return a cached jax.jit-compiled (vmap . value_and_grad) callable for the given
-    (fun, op-sequence) shape, building and caching it on first use.
+def _validate_batch_paths(paths):
+    paths = list(paths)
+    if not paths:
+        raise ValueError("replay_value_and_grad_batch requires at least one path")
+    if not all(isinstance(path, list) for path in paths):
+        raise TypeError("paths must contain resolved path lists")
+    names = tuple(node.name for node in paths[0])
+    if any(tuple(node.name for node in path) != names for path in paths[1:]):
+        raise ValueError(
+            "replay_value_and_grad_batch requires all paths to share the same "
+            "op-name sequence (same traced control flow)."
+        )
+    return paths, names
 
-    `leaf_layout` is a pure function of the traced op-name sequence (not of J or the
-    concrete choice values), so it's a safe, stable cache key: every call whose fun and
-    control-flow shape match reuses the same jitted wrapper. JAX's own shape-based
-    dispatch then recompiles only when it sees a new J (batch size) and otherwise reuses
-    the compiled program -- exactly what we want once J plateaus near convergence.
 
-    This must be constructed once and reused, not rebuilt+jitted per call: jax.jit on a
-    freshly-built function object every call gets zero cache reuse (jit's cache is keyed
-    to the wrapped function's identity), so it would only add compilation overhead on
-    top of the existing eager cost.
+def _pad_batch_leaves(leaves, batch_size):
+    padded_size = _bucket_size(batch_size)
+    if padded_size == batch_size:
+        return leaves, padded_size
+    padding = padded_size - batch_size
+    padded = [
+        jnp.pad(leaf, [(0, padding)] + [(0, 0)] * (leaf.ndim - 1), mode="edge")
+        for leaf in leaves
+    ]
+    return padded, padded_size
 
-    Safe to cache because the per-path choice data always flows in as traced vmap
-    arguments (`inner_args`/`flat_node_leaves` below), never as closed-over Python
-    constants -- so reusing the compiled program across calls with different H0 entries
-    cannot go stale.
-    """
+
+def _build_jit_batched_vg(fun, leaf_layout, n_args, argnums, has_aux):
     key = (fun, tuple(leaf_layout), n_args, argnums, has_aux)
-    cached = _jit_batch_cache.get(key)
-    if cached is not None:
-        return cached
-
     def vmap_body(*inner_args):
         call_args = inner_args[:n_args]
         flat_node_leaves = inner_args[n_args:]
@@ -975,9 +979,24 @@ def _get_jit_batched_vg(fun, leaf_layout, n_args, argnums, has_aux):
         total_leaves += n_leaves
     in_axes = (None,) * n_args + (0,) * total_leaves
     vmap_vg_fn = jax.vmap(jax_vg_fn, in_axes=in_axes)
-    jitted = jax.jit(vmap_vg_fn)
-    _jit_batch_cache[key] = jitted
-    return jitted
+    return key, jax.jit(vmap_vg_fn)
+
+
+def _get_jit_batched_vg(fun, leaf_layout, n_args, argnums, has_aux):
+    key = (fun, tuple(leaf_layout), n_args, argnums, has_aux)
+    if key not in _jit_batch_cache:
+        _, compiled = _build_jit_batched_vg(fun, leaf_layout, n_args, argnums, has_aux)
+        _jit_batch_cache[key] = compiled
+    return _jit_batch_cache[key]
+
+
+def _execute_batched_vg(fun, leaf_layout, argnums, has_aux, args, leaves, batch_size):
+    padded_leaves, padded_size = _pad_batch_leaves(leaves, batch_size)
+    compiled = _get_jit_batched_vg(fun, leaf_layout, len(args), argnums, has_aux)
+    result = compiled(*args, *padded_leaves)
+    if padded_size != batch_size:
+        result = jax.tree_util.tree_map(lambda value: value[:batch_size], result)
+    return result
 
 
 def replay_value_and_grad_batch(fun, paths, argnums=0, has_aux=False):
@@ -997,45 +1016,22 @@ def replay_value_and_grad_batch(fun, paths, argnums=0, has_aux=False):
     calls (see _get_jit_batched_vg) -- without that, every call pays full un-jitted JAX
     dispatch overhead for every op regardless of batching.
     """
-    paths = list(paths)
+    paths, names = _validate_batch_paths(paths)
     J = len(paths)
-    if J == 0:
-        raise ValueError("replay_value_and_grad_batch requires at least one path")
-    if not all(isinstance(path, list) for path in paths):
-        raise TypeError("paths must contain resolved path lists")
-    names = [node.name for node in paths[0]]
-    if any([node.name for node in path] != names for path in paths[1:]):
-        raise ValueError(
-            "replay_value_and_grad_batch requires all paths to share the same "
-            "op-name sequence (same traced control flow)."
-        )
     encoded_leaves, leaf_layout = _build_batch_leaves(paths, names)
 
     def batched_val_grad(*args, **kwargs):
         if kwargs:
             raise TypeError("replay_value_and_grad_batch does not support kwargs")
-        n_args = len(args)
-        flat_leaves = encoded_leaves
-
-        # Pad the batch axis up to a power-of-two bucket so the jitted vmap_body only
-        # recompiles for a new bucket size, not for every distinct J -- see
-        # _bucket_size. Safe because vmap's batching is embarrassingly parallel (no
-        # reduction across the batch axis inside vmap_body/fun), so repeating the last
-        # path's leaf data into the padding lanes cannot affect the real lanes' values
-        # or grads; slicing back to [:J] below reproduces an unpadded call exactly.
-        padded_J = _bucket_size(J)
-        if padded_J != J:
-            pad_amount = padded_J - J
-            flat_leaves = [
-                jnp.pad(leaf, [(0, pad_amount)] + [(0, 0)] * (leaf.ndim - 1), mode="edge")
-                for leaf in flat_leaves
-            ]
-
-        vmap_vg_fn = _get_jit_batched_vg(fun, leaf_layout, n_args, argnums, has_aux)
-        vg_out = vmap_vg_fn(*args, *flat_leaves)
-
-        if padded_J != J:
-            vg_out = jax.tree_util.tree_map(lambda a: a[:J], vg_out)
+        vg_out = _execute_batched_vg(
+            fun,
+            leaf_layout,
+            argnums,
+            has_aux,
+            args,
+            encoded_leaves,
+            J,
+        )
 
         if has_aux:
             (values, aux), grads = vg_out
