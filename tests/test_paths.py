@@ -140,9 +140,19 @@ def test_format_path_describes_branch_choices():
     assert "Step 1 (maximum)" in text
     assert "standard choice" in text
 
-    max_path = make_path(("max", 2))
+    max_path = make_path(("max", ht._ReductionChoice(2)))
     formatter = bead.PathSet.from_trace([])
-    assert "scalar choice = 2" in formatter.format_path(max_path)
+    assert "selected index = 2" in formatter.format_path(max_path)
     assert formatter.format_path([]) == "No decision points"
     with pytest.raises(TypeError):
         formatter.format_path("invalid")
+
+
+def test_recorded_choices_use_named_types():
+    reduction = bead.record(lambda value: bnp.max(value))(jnp.array([1.0, 1.0]))[1][0]
+    elementwise = bead.record(lambda value: bnp.maximum(value, 0.0))(jnp.zeros(2))[1][0]
+    absolute = bead.record(lambda value: bnp.abs(value))(jnp.zeros(2))[1][0]
+
+    assert isinstance(reduction[0].choices[0], ht._ReductionChoice)
+    assert isinstance(elementwise[0].choices[0], ht._ElementwiseChoice)
+    assert isinstance(absolute[0].choices[0], ht._AbsChoice)

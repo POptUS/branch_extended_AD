@@ -159,7 +159,7 @@ def test_multidimensional_primitives_record_replay_and_gradients():
     zero_matrix = jnp.zeros((2, 2))
     value, paths = bead.record(absolute)(zero_matrix)
     assert value == 0.0
-    assert len(paths.choices(-1)[0][0]) == zero_matrix.size
+    assert len(paths.choices(-1)[0].nearby_indices) == zero_matrix.size
     _, gradient = bead.replay_value_and_grad(absolute, paths[0])(zero_matrix)
     assert gradient.shape == zero_matrix.shape
 

@@ -51,9 +51,9 @@ def test_input_scaled_tolerance_avoids_flat_region_overbranching():
     _, local_center_paths = bead.record(f, atol=0.1)(center)
     _, scaled_center_paths = bead.record(f, atol=0.1, tol_mode="input_scaled")(center)
     _, scaled_edge_paths = bead.record(f, atol=0.1, tol_mode="input_scaled")(edge)
-    local_center_nearby = local_center_paths.choices(-1)[0][0]
-    scaled_center_nearby = scaled_center_paths.choices(-1)[0][0]
-    scaled_edge_nearby = scaled_edge_paths.choices(-1)[0][0]
+    local_center_nearby = local_center_paths.choices(-1)[0].nearby_indices
+    scaled_center_nearby = scaled_center_paths.choices(-1)[0].nearby_indices
+    scaled_edge_nearby = scaled_edge_paths.choices(-1)[0].nearby_indices
     assert len(local_center_nearby) == center.size
     assert len(scaled_center_nearby) == 0
     assert len(scaled_edge_nearby) > len(scaled_center_nearby)

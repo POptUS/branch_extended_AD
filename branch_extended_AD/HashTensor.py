@@ -54,6 +54,26 @@ class _TraceNode:
             return NotImplemented
         return self.name == other.name and self.choices == other.choices
 
+
+@dataclass(frozen=True)
+class _ReductionChoice:
+    index: int
+
+
+@dataclass(frozen=True)
+class _ElementwiseChoice:
+    nearby_indices: tuple
+    choice_bits: int
+    base_pick_two: tuple
+
+
+@dataclass(frozen=True)
+class _AbsChoice:
+    nearby_indices: tuple
+    base_negate: tuple
+    choice_bits: int | None = None
+
+
 class PathSet:
     def __init__(self, *, trace=None, paths=None):
         if (trace is None) == (paths is None):
@@ -185,16 +205,17 @@ class PathSet:
         for step, decision in enumerate(path, start=1):
             choice = decision.choices[0]
             prefix = f"  Step {step} ({decision.name}): "
-            if isinstance(choice, tuple) and len(choice) == 2 and all(isinstance(item, tuple) for item in choice):
-                nearby_indices, _ = choice
-                description = "standard absolute value" if not nearby_indices else f"ambiguous indices {list(nearby_indices)}"
-            elif isinstance(choice, tuple) and len(choice) >= 2 and isinstance(choice[0], tuple):
-                nearby_indices, choice_int = choice[:2]
-                flipped = [index for bit, index in enumerate(nearby_indices) if (choice_int >> bit) & 1]
+            if isinstance(choice, _AbsChoice):
+                if choice.choice_bits is None:
+                    description = "standard absolute value" if not choice.nearby_indices else f"ambiguous indices {list(choice.nearby_indices)}"
+                else:
+                    flipped = [index for bit, index in enumerate(choice.nearby_indices) if (choice.choice_bits >> bit) & 1]
+                    description = "standard choice" if not flipped else f"flip indices {flipped}"
+            elif isinstance(choice, _ElementwiseChoice):
+                flipped = [index for bit, index in enumerate(choice.nearby_indices) if (choice.choice_bits >> bit) & 1]
                 description = "standard choice" if not flipped else f"flip indices {flipped}"
-            elif isinstance(choice, tuple):
-                indices = [index for index, selected in enumerate(choice) if selected]
-                description = "standard absolute value" if not indices else f"negate at indices {indices}"
+            elif isinstance(choice, _ReductionChoice):
+                description = f"selected index = {choice.index}"
             else:
                 description = f"scalar choice = {choice}"
             lines.append(prefix + description)
@@ -532,10 +553,10 @@ def max(inval):
         nearby_locs, = jnp.where(jnp.ravel(_near(val - inval.value, tolerance)))
         nearby_locs = tuple(int(x) for x in nearby_locs.tolist())
         logger.debug("max: recording - loc=%s, val=%s, nearby_locs=%s", loc, val, nearby_locs)
-        _trace_append("max", nearby_locs)
+        _trace_append("max", [_ReductionChoice(index) for index in nearby_locs])
     elif _branch_state.get().mode == "vmap_replay":
         node, selector = _trace_popf_vmap("max")
-        nearby_locs_arr = jnp.asarray(node.choices)
+        nearby_locs_arr = jnp.asarray([choice.index for choice in node.choices])
         loc = nearby_locs_arr[selector]
         val = flat_value[loc]
         logger.debug("max: vmap replaying - loc=%s, val=%s", loc, val)
@@ -544,7 +565,7 @@ def max(inval):
         val = flat_value[loc]
         logger.debug("max: batch replaying - loc=%s, val=%s", loc, val)
     else:
-        loc = _trace_popf("max")
+        loc = _trace_popf("max").index
         val = flat_value[loc]
         logger.debug("max: replaying - loc=%s, val=%s", loc, val)
     sensitivity = None
@@ -571,10 +592,10 @@ def min(inval):
         nearby_locs, = jnp.where(jnp.ravel(_near(inval.value - val, tolerance)))
         nearby_locs = tuple(int(x) for x in nearby_locs.tolist())
         logger.debug("min: recording - loc=%s, val=%s, nearby_locs=%s", loc, val, nearby_locs)
-        _trace_append("min", nearby_locs)
+        _trace_append("min", [_ReductionChoice(index) for index in nearby_locs])
     elif _branch_state.get().mode == "vmap_replay":
         node, selector = _trace_popf_vmap("min")
-        nearby_locs_arr = jnp.asarray(node.choices)
+        nearby_locs_arr = jnp.asarray([choice.index for choice in node.choices])
         loc = nearby_locs_arr[selector]
         val = flat_value[loc]
         logger.debug("min: vmap replaying - loc=%s, val=%s", loc, val)
@@ -583,7 +604,7 @@ def min(inval):
         val = flat_value[loc]
         logger.debug("min: batch replaying - loc=%s, val=%s", loc, val)
     else:
-        loc = _trace_popf("min")
+        loc = _trace_popf("min").index
         val = flat_value[loc]
         logger.debug("min: replaying - loc=%s, val=%s", loc, val)
     sensitivity = None
@@ -612,11 +633,16 @@ def _elementwise_minmax(one, two, name, jnp_op, prefer_first):
         base_pick_two = tuple(bool(x) for x in jnp.ravel(jnp_op(one.value, two.value) == two.value).tolist())
         # Each nearby element contributes an independent binary branch.
         n_choices = 2 ** len(nearby_indices)
-        choices = [(nearby_indices, i, base_pick_two) for i in range(n_choices)]
+        choices = [
+            _ElementwiseChoice(nearby_indices, choice_bits, base_pick_two)
+            for choice_bits in range(n_choices)
+        ]
         _trace_append(name, choices)
     elif _branch_state.get().mode == "vmap_replay":
         node, selector = _trace_popf_vmap(name)
-        nearby_indices, _, base_pick_two = node.choices[0]
+        first_choice = node.choices[0]
+        nearby_indices = first_choice.nearby_indices
+        base_pick_two = first_choice.base_pick_two
         m = len(base_pick_two)
         nearby_arr = np.array(nearby_indices, dtype=np.intp)
         base_arr = np.array(base_pick_two)
@@ -633,9 +659,9 @@ def _elementwise_minmax(one, two, name, jnp_op, prefer_first):
         logger.debug("%s: batch replaying - pick_two=%s, result=%s", name, pick_two, result.value)
         return result
     else:
-        nearby_indices, choice_int, base_pick_two = _trace_popf(name)
+        choice = _trace_popf(name)
         pick_two = _reshape_pick_two(
-            _resolve_pick_two(nearby_indices, choice_int, base_pick_two),
+            _resolve_pick_two(choice.nearby_indices, choice.choice_bits, choice.base_pick_two),
             one.value,
             two.value,
         )
@@ -732,11 +758,11 @@ def abs(inval):
         base_negate = tuple(bool(x) for x in jnp.ravel(inval.value < 0).tolist())
         if _branch_state.get().abs_policy == "enumerate":
             choices = [
-                (nearby_indices, choice_int, base_negate)
-                for choice_int in range(2 ** len(nearby_indices))
+                _AbsChoice(nearby_indices, base_negate, choice_bits)
+                for choice_bits in range(2 ** len(nearby_indices))
             ]
         else:
-            choices = [(nearby_indices, base_negate)]
+            choices = [_AbsChoice(nearby_indices, base_negate)]
         _trace_append("abs", choices)
         if _branch_state.get().abs_policy == "enumerate":
             value = _abs_from_branch(inval.value, nearby_indices, 0, base_negate)
@@ -748,12 +774,10 @@ def abs(inval):
     elif _branch_state.get().mode == "vmap_replay":
         node, selector = _trace_popf_vmap("abs")
         choice = node.choices[0]
-        if len(choice) == 3:
-            nearby_indices, _, base_negate = choice
-            result = _HashTensor(_abs_from_branch(inval.value, nearby_indices, selector, base_negate))
+        if choice.choice_bits is not None:
+            result = _HashTensor(_abs_from_branch(inval.value, choice.nearby_indices, selector, choice.base_negate))
         else:
-            nearby_indices, base_negate = choice
-            result = _HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate))
+            result = _HashTensor(_abs_from_choice(inval.value, choice.nearby_indices, choice.base_negate))
         logger.debug("abs: vmap replaying - result=%s", result.value)
         return result
     elif _branch_state.get().mode == "batch_replay":
@@ -765,12 +789,10 @@ def abs(inval):
         return result
     else:
         choice = _trace_popf("abs")
-        if len(choice) == 3:
-            nearby_indices, choice_int, base_negate = choice
-            result = _HashTensor(_abs_from_branch(inval.value, nearby_indices, choice_int, base_negate))
+        if choice.choice_bits is not None:
+            result = _HashTensor(_abs_from_branch(inval.value, choice.nearby_indices, choice.choice_bits, choice.base_negate))
         else:
-            nearby_indices, base_negate = choice
-            result = _HashTensor(_abs_from_choice(inval.value, nearby_indices, base_negate))
+            result = _HashTensor(_abs_from_choice(inval.value, choice.nearby_indices, choice.base_negate))
         logger.debug("abs: replaying - result=%s", result.value)
         return result
 
@@ -891,31 +913,32 @@ def _build_batch_leaves(paths, names):
     for i, name in enumerate(names):
         choices = [path[i].choices[0] for path in paths]
         if name in ("max", "min"):
-            loc_arr = jnp.asarray(choices, dtype=jnp.int32)
+            loc_arr = jnp.asarray([choice.index for choice in choices], dtype=jnp.int32)
             flat_leaves.append(loc_arr)
             leaf_layout.append((name, 1))
         elif name == "abs":
-            enumerated = len(choices[0]) == 3
-            p = len(choices[0][2] if enumerated else choices[0][1])
+            enumerated = choices[0].choice_bits is not None
+            p = len(choices[0].base_negate)
             negate = np.zeros((J, p), dtype=bool)
             ambiguous = np.zeros((J, p), dtype=bool)
             for k, choice in enumerate(choices):
                 if enumerated:
-                    nearby_indices, choice_int, base_negate = choice
-                    negate[k] = np.asarray(base_negate, dtype=bool)
-                    for bit, index in enumerate(nearby_indices):
-                        if (choice_int >> bit) & 1:
+                    negate[k] = np.asarray(choice.base_negate, dtype=bool)
+                    for bit, index in enumerate(choice.nearby_indices):
+                        if (choice.choice_bits >> bit) & 1:
                             negate[k, index] = not negate[k, index]
                 else:
-                    nearby_indices, base_negate = choice
-                    negate[k] = np.asarray(base_negate, dtype=bool)
-                    if len(nearby_indices) > 0:
-                        ambiguous[k, np.array(nearby_indices, dtype=np.intp)] = True
+                    negate[k] = np.asarray(choice.base_negate, dtype=bool)
+                    if choice.nearby_indices:
+                        ambiguous[k, np.array(choice.nearby_indices, dtype=np.intp)] = True
             flat_leaves.append(jnp.asarray(ambiguous))
             flat_leaves.append(jnp.asarray(negate))
             leaf_layout.append((name, 2))
         elif name in ("maximum", "minimum"):
-            pick_two = np.stack([_resolve_pick_two(*c) for c in choices])
+            pick_two = np.stack([
+                _resolve_pick_two(choice.nearby_indices, choice.choice_bits, choice.base_pick_two)
+                for choice in choices
+            ])
             flat_leaves.append(jnp.asarray(pick_two))
             leaf_layout.append((name, 1))
         else:
