@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "branch_extended_AD"
 version = "0.1.0"
-description = "Branch-extended automatic differentiation for JAX functions"
+description = "Branch-extended automatic differentiation for JAX and PyTorch functions"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
@@ -16,13 +16,13 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Operating System :: OS Independent",
 ]
-dependencies = [
-  "jax",
-  "numpy",
-]
+dependencies = []
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = ["pytest", "jax", "numpy"]
+test-torch = ["pytest", "torch"]
+jax = ["jax", "numpy"]
+torch = ["torch", "numpy"]
 
 [project.urls]
 Repository = "https://github.com/POptUS/branch_extended_AD"
