@@ -9,6 +9,74 @@ import branch_extended_AD.numpy as bnp
 ht = importlib.import_module("branch_extended_AD.HashTensor")
 
 
+@pytest.mark.parametrize("operation, sign", [(bnp.max, 1.0), (bnp.min, -1.0)])
+@pytest.mark.parametrize("shape", [(3,), (1, 3)])
+@pytest.mark.parametrize("has_aux", [False, True])
+def test_nearby_reduction_keeps_executed_path_first(operation, sign, shape, has_aux):
+    x = (sign * jnp.array([1.0, 1.05, 0.5])).reshape(shape)
+
+    def function(x):
+        value = operation(x)
+        return (value, {"selected": value}) if has_aux else value
+
+    scalar_function = lambda x: function(x)[0] if has_aux else function(x)
+    expected_value = scalar_function(x)
+    expected_gradient = jnp.array([0.0, 1.0, 0.0]).reshape(shape)
+    recorded, paths = bead.record(function, atol=0.1)(x)
+    assert len(paths) == 2
+    assert paths.choices(0)[0].index == 1
+    assert len(set(paths.choices(0))) == 2
+    replayed = bead.replay(function, paths[0])(x)
+    assert jnp.allclose(recorded[0] if has_aux else recorded, expected_value)
+    assert jnp.allclose(replayed[0] if has_aux else replayed, expected_value)
+
+    gradient, _ = bead.grad(function, atol=0.1, has_aux=has_aux)(x)
+    value_gradient, _ = bead.value_and_grad(function, atol=0.1, has_aux=has_aux)(x)
+    if has_aux:
+        gradient, aux = gradient
+        (value, value_aux), vg_gradient = value_gradient
+        assert jnp.allclose(aux["selected"], expected_value)
+        assert jnp.allclose(value_aux["selected"], expected_value)
+    else:
+        value, vg_gradient = value_gradient
+    assert jnp.allclose(value, expected_value)
+    assert jnp.allclose(gradient, expected_gradient)
+    assert jnp.allclose(vg_gradient, expected_gradient)
+
+    results, all_paths = bead.all_value_and_grad(function, atol=0.1, has_aux=has_aux)(x)
+    batch_values, batch_gradients = bead.replay_value_and_grad_batch(
+        function, paths, has_aux=has_aux
+    )(x)
+    if has_aux:
+        batch_values, _ = batch_values
+    assert len(all_paths) == 2
+    for i, path in enumerate(paths):
+        path_value, path_gradient = bead.replay_value_and_grad(
+            function, path, has_aux=has_aux
+        )(x)
+        all_value, all_gradient = results[i]
+        if has_aux:
+            path_value, _ = path_value
+            all_value, _ = all_value
+        assert jnp.allclose(batch_values[i], path_value)
+        assert jnp.allclose(batch_gradients[i], path_gradient)
+        assert jnp.allclose(all_value, path_value)
+        assert jnp.allclose(all_gradient, path_gradient)
+    assert jnp.allclose(batch_values[0], expected_value)
+    assert jnp.allclose(batch_gradients[0], expected_gradient)
+
+
+@pytest.mark.parametrize("operation, sign", [(bnp.max, 1.0), (bnp.min, -1.0)])
+def test_input_scaled_zero_tolerance_retains_executed_reduction(operation, sign):
+    x = sign * jnp.array([1.0, 1.05, 0.5])
+    (value, gradient), paths = bead.value_and_grad(
+        operation, tol_mode="input_scaled"
+    )(x)
+    assert len(paths) == 1
+    assert jnp.allclose(value, sign * 1.05)
+    assert jnp.allclose(gradient, jnp.array([0.0, 1.0, 0.0]))
+
+
 def test_record_and_replay():
     x1 = jnp.array([1.0, 2.0, 2.5])
     x2 = jnp.array([0.95, 1.5, 3.0])

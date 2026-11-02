@@ -563,6 +563,8 @@ def max(inval):
         tolerance = _tolerance(val, scale)
         nearby_locs, = jnp.where(jnp.ravel(_near(val - inval.value, tolerance)))
         nearby_locs = tuple(int(x) for x in nearby_locs.tolist())
+        # The first recorded choice must reproduce the executed branch.
+        nearby_locs = (int(loc),) + tuple(index for index in nearby_locs if index != int(loc))
         logger.debug("max: recording - loc=%s, val=%s, nearby_locs=%s", loc, val, nearby_locs)
         _trace_append("max", [_ReductionChoice(index) for index in nearby_locs])
     elif _branch_state.get().mode == "vmap_replay":
@@ -602,6 +604,8 @@ def min(inval):
         tolerance = _tolerance(val, scale)
         nearby_locs, = jnp.where(jnp.ravel(_near(inval.value - val, tolerance)))
         nearby_locs = tuple(int(x) for x in nearby_locs.tolist())
+        # The first recorded choice must reproduce the executed branch.
+        nearby_locs = (int(loc),) + tuple(index for index in nearby_locs if index != int(loc))
         logger.debug("min: recording - loc=%s, val=%s, nearby_locs=%s", loc, val, nearby_locs)
         _trace_append("min", [_ReductionChoice(index) for index in nearby_locs])
     elif _branch_state.get().mode == "vmap_replay":
@@ -820,7 +824,8 @@ def record(fun, *, atol=0.0, rtol=0.0, tol_mode="local", abs_policy="zero"):
         abs_policy: ``"zero"`` or ``"enumerate"``.
 
     Returns:
-        A function that returns ``(value, paths)``.
+        A function that returns ``(value, paths)``. The first path reproduces
+        the recorded branch choices, including the chosen absolute-value policy.
     """
     atol, rtol, tol_mode, abs_policy = _resolve_options(atol, rtol, tol_mode, abs_policy)
 
